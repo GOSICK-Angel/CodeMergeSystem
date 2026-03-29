@@ -11,10 +11,8 @@ from src.llm.prompts.planner_prompts import (
     PLANNER_SYSTEM,
     build_classification_prompt,
     build_revision_prompt,
-    build_context_summary_prompt,
 )
-from src.llm.response_parser import ParseError
-from src.tools.file_classifier import compute_risk_score, classify_file, is_security_sensitive
+from src.tools.file_classifier import compute_risk_score, classify_file
 import json
 
 
@@ -28,9 +26,7 @@ class PlannerAgent(BaseAgent):
         plan = await self._generate_plan(state)
         state.merge_plan = plan
         state.file_classifications = {
-            fp: batch.risk_level
-            for batch in plan.phases
-            for fp in batch.file_paths
+            fp: batch.risk_level for batch in plan.phases for fp in batch.file_paths
         }
 
         return AgentMessage(
@@ -43,7 +39,6 @@ class PlannerAgent(BaseAgent):
         )
 
     async def _generate_plan(self, state: MergeState) -> MergePlan:
-        file_diffs = list(state.conflict_analyses.values()) if state.conflict_analyses else []
         all_file_diffs: list[FileDiff] = []
 
         if hasattr(state, "_file_diffs") and state._file_diffs:
@@ -57,13 +52,17 @@ class PlannerAgent(BaseAgent):
         messages = [{"role": "user", "content": prompt}]
 
         try:
-            raw_response = await self._call_llm_with_retry(messages, system=PLANNER_SYSTEM)
+            raw_response = await self._call_llm_with_retry(
+                messages, system=PLANNER_SYSTEM
+            )
             raw_str = str(raw_response)
 
             raw_str_clean = raw_str.strip()
             if raw_str_clean.startswith("```"):
                 lines = raw_str_clean.splitlines()
-                raw_str_clean = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+                raw_str_clean = "\n".join(
+                    lines[1:-1] if lines[-1] == "```" else lines[1:]
+                )
             plan_data = json.loads(raw_str_clean)
 
         except Exception:
@@ -81,7 +80,11 @@ class PlannerAgent(BaseAgent):
         excluded = []
 
         for fd in file_diffs:
-            rl = fd.risk_level.value if hasattr(fd.risk_level, "value") else fd.risk_level
+            rl = (
+                fd.risk_level.value
+                if hasattr(fd.risk_level, "value")
+                else fd.risk_level
+            )
             if rl == "auto_safe":
                 auto_safe.append(fd.file_path)
             elif rl == "auto_risky":
@@ -96,37 +99,45 @@ class PlannerAgent(BaseAgent):
                 excluded.append(fd.file_path)
 
         if auto_safe:
-            phases.append({
-                "batch_id": str(uuid4()),
-                "phase": "auto_merge",
-                "file_paths": auto_safe,
-                "risk_level": "auto_safe",
-                "can_parallelize": True,
-            })
+            phases.append(
+                {
+                    "batch_id": str(uuid4()),
+                    "phase": "auto_merge",
+                    "file_paths": auto_safe,
+                    "risk_level": "auto_safe",
+                    "can_parallelize": True,
+                }
+            )
         if auto_risky:
-            phases.append({
-                "batch_id": str(uuid4()),
-                "phase": "auto_merge",
-                "file_paths": auto_risky,
-                "risk_level": "auto_risky",
-                "can_parallelize": True,
-            })
+            phases.append(
+                {
+                    "batch_id": str(uuid4()),
+                    "phase": "auto_merge",
+                    "file_paths": auto_risky,
+                    "risk_level": "auto_risky",
+                    "can_parallelize": True,
+                }
+            )
         if human_required:
-            phases.append({
-                "batch_id": str(uuid4()),
-                "phase": "human_review",
-                "file_paths": human_required,
-                "risk_level": "human_required",
-                "can_parallelize": False,
-            })
+            phases.append(
+                {
+                    "batch_id": str(uuid4()),
+                    "phase": "human_review",
+                    "file_paths": human_required,
+                    "risk_level": "human_required",
+                    "can_parallelize": False,
+                }
+            )
         if deleted_only:
-            phases.append({
-                "batch_id": str(uuid4()),
-                "phase": "auto_merge",
-                "file_paths": deleted_only,
-                "risk_level": "deleted_only",
-                "can_parallelize": True,
-            })
+            phases.append(
+                {
+                    "batch_id": str(uuid4()),
+                    "phase": "auto_merge",
+                    "file_paths": deleted_only,
+                    "risk_level": "deleted_only",
+                    "can_parallelize": True,
+                }
+            )
 
         total = len(file_diffs)
         auto_count = len(auto_safe) + len(deleted_only)
@@ -171,7 +182,9 @@ class PlannerAgent(BaseAgent):
                     phase=phase,
                     file_paths=batch_data.get("file_paths", []),
                     risk_level=risk_level,
-                    estimated_duration_minutes=batch_data.get("estimated_duration_minutes"),
+                    estimated_duration_minutes=batch_data.get(
+                        "estimated_duration_minutes"
+                    ),
                     can_parallelize=batch_data.get("can_parallelize", True),
                 )
             )
@@ -185,7 +198,9 @@ class PlannerAgent(BaseAgent):
             deleted_only_count=int(rs_data.get("deleted_only_count", 0)),
             binary_count=int(rs_data.get("binary_count", 0)),
             excluded_count=int(rs_data.get("excluded_count", 0)),
-            estimated_auto_merge_rate=float(rs_data.get("estimated_auto_merge_rate", 0.0)),
+            estimated_auto_merge_rate=float(
+                rs_data.get("estimated_auto_merge_rate", 0.0)
+            ),
             top_risk_files=rs_data.get("top_risk_files", []),
         )
 
@@ -216,7 +231,9 @@ class PlannerAgent(BaseAgent):
         messages = [{"role": "user", "content": prompt}]
 
         try:
-            raw_response = await self._call_llm_with_retry(messages, system=PLANNER_SYSTEM)
+            raw_response = await self._call_llm_with_retry(
+                messages, system=PLANNER_SYSTEM
+            )
             raw_str = str(raw_response).strip()
             if raw_str.startswith("```"):
                 lines = raw_str.splitlines()
@@ -239,23 +256,27 @@ class PlannerAgent(BaseAgent):
         for batch in original_plan.phases:
             new_paths = [p for p in batch.file_paths if p not in reclassify]
             if new_paths:
-                phases_data.append({
-                    "batch_id": batch.batch_id,
-                    "phase": batch.phase.value,
-                    "file_paths": new_paths,
-                    "risk_level": batch.risk_level.value,
-                    "can_parallelize": batch.can_parallelize,
-                })
+                phases_data.append(
+                    {
+                        "batch_id": batch.batch_id,
+                        "phase": batch.phase.value,
+                        "file_paths": new_paths,
+                        "risk_level": batch.risk_level.value,
+                        "can_parallelize": batch.can_parallelize,
+                    }
+                )
 
         escalated = [fp for fp in reclassify if reclassify[fp] == "human_required"]
         if escalated:
-            phases_data.append({
-                "batch_id": str(uuid4()),
-                "phase": "human_review",
-                "file_paths": escalated,
-                "risk_level": "human_required",
-                "can_parallelize": False,
-            })
+            phases_data.append(
+                {
+                    "batch_id": str(uuid4()),
+                    "phase": "human_review",
+                    "file_paths": escalated,
+                    "risk_level": "human_required",
+                    "can_parallelize": False,
+                }
+            )
 
         rs = original_plan.risk_summary
         return {
@@ -286,7 +307,9 @@ class PlannerAgent(BaseAgent):
         issues = [
             PlanIssue(
                 file_path=fp,
-                current_classification=state.file_classifications.get(fp, RiskLevel.AUTO_SAFE),
+                current_classification=state.file_classifications.get(
+                    fp, RiskLevel.AUTO_SAFE
+                ),
                 suggested_classification=new_level,
                 reason=dispute.dispute_reason,
                 issue_type="risk_underestimated",
@@ -298,6 +321,7 @@ class PlannerAgent(BaseAgent):
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus
+
         return state.status in (SystemStatus.PLANNING, SystemStatus.PLAN_REVISING)
 
     def _classify_file(self, file_diff: FileDiff, config: MergeConfig) -> RiskLevel:

@@ -233,7 +233,7 @@ class BaseAgent(ABC):
 | Judge | `judge_agent.py` | 只读审查合并结果，输出 JudgeVerdict |
 | HumanInterface | `human_interface_agent.py` | 人工决策收集与呈现 |
 
-各 Agent 详细职责见 `agents.md`。
+各 Agent 详细职责见 `agents-design.md`。
 
 ### 5.2 `src/core/` — 编排层
 

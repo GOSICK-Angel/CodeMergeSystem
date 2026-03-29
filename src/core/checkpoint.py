@@ -1,5 +1,4 @@
 import json
-import os
 import signal
 from pathlib import Path
 from src.models.state import MergeState
@@ -16,7 +15,9 @@ class Checkpoint:
         checkpoint_path = self.checkpoint_dir / filename
 
         data = state.model_dump(mode="json")
-        checkpoint_path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        checkpoint_path.write_text(
+            json.dumps(data, indent=2, default=str), encoding="utf-8"
+        )
 
         latest_link = self.checkpoint_dir / f"run_{run_id}_latest.json"
         if latest_link.exists() or latest_link.is_symlink():
@@ -24,9 +25,10 @@ class Checkpoint:
         try:
             latest_link.symlink_to(checkpoint_path.name)
         except (OSError, NotImplementedError):
-            latest_link.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+            latest_link.write_text(
+                json.dumps(data, indent=2, default=str), encoding="utf-8"
+            )
 
-        state_copy = state.model_copy(update={"checkpoint_path": str(checkpoint_path)})
         state.checkpoint_path = str(checkpoint_path)
 
         return checkpoint_path
@@ -42,7 +44,8 @@ class Checkpoint:
     def list_checkpoints(self, run_id: str) -> list[Path]:
         pattern = f"run_{run_id}_*.json"
         checkpoints = [
-            p for p in self.checkpoint_dir.glob(pattern)
+            p
+            for p in self.checkpoint_dir.glob(pattern)
             if not p.name.endswith("_latest.json") and not p.is_symlink()
         ]
         return sorted(checkpoints, key=lambda p: p.stat().st_mtime)

@@ -43,7 +43,6 @@ class JudgeAgent(BaseAgent):
 
             merged_content = ""
             if self.git_tool is not None:
-                from pathlib import Path
                 abs_path = self.git_tool.repo_path / file_path
                 if abs_path.exists():
                     merged_content = abs_path.read_text(encoding="utf-8")

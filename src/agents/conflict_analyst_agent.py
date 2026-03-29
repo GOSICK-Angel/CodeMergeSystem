@@ -123,7 +123,6 @@ class ConflictAnalystAgent(BaseAgent):
         )
 
     def compute_confidence(self, analysis: ConflictAnalysis, has_base_version: bool) -> float:
-        from src.tools.file_classifier import compute_risk_score
         base_confidence = analysis.confidence
 
         type_adjustment = {

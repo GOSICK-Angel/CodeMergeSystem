@@ -1,5 +1,4 @@
 from datetime import datetime
-from pathlib import Path
 from src.models.decision import FileDecisionRecord, MergeDecision, DecisionSource
 from src.models.diff import FileStatus
 from src.models.state import MergeState

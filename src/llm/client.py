@@ -3,7 +3,6 @@ from abc import ABC, abstractmethod
 import anthropic
 import openai
 from pydantic import BaseModel
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from src.models.config import AgentLLMConfig
 
 

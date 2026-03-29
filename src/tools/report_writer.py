@@ -1,8 +1,6 @@
 import json
-from datetime import datetime
 from pathlib import Path
 from src.models.state import MergeState
-from src.models.decision import MergeDecision
 
 
 def write_markdown_report(state: MergeState, output_dir: str) -> Path:
@@ -13,28 +11,28 @@ def write_markdown_report(state: MergeState, output_dir: str) -> Path:
 
     lines: list[str] = [
         f"# Merge Report — {state.run_id}",
-        f"",
+        "",
         f"**Status**: {state.status.value if hasattr(state.status, 'value') else state.status}",
         f"**Created**: {state.created_at.isoformat()}",
         f"**Updated**: {state.updated_at.isoformat()}",
-        f"",
+        "",
     ]
 
     if state.merge_plan:
         plan = state.merge_plan
         lines += [
-            f"## Merge Plan",
+            "## Merge Plan",
             f"- Upstream: `{plan.upstream_ref}`",
             f"- Fork: `{plan.fork_ref}`",
             f"- Merge base: `{plan.merge_base_commit}`",
-            f"",
-            f"### Risk Summary",
+            "",
+            "### Risk Summary",
             f"- Total files: {plan.risk_summary.total_files}",
             f"- Auto-safe: {plan.risk_summary.auto_safe_count}",
             f"- Auto-risky: {plan.risk_summary.auto_risky_count}",
             f"- Human required: {plan.risk_summary.human_required_count}",
             f"- Estimated auto-merge rate: {plan.risk_summary.estimated_auto_merge_rate:.1%}",
-            f"",
+            "",
         ]
 
     if state.file_decision_records:
@@ -51,13 +49,13 @@ def write_markdown_report(state: MergeState, output_dir: str) -> Path:
         verdict = state.judge_verdict
         verdict_val = verdict.verdict.value if hasattr(verdict.verdict, "value") else verdict.verdict
         lines += [
-            f"## Judge Verdict",
+            "## Judge Verdict",
             f"- **Result**: {verdict_val}",
             f"- **Confidence**: {verdict.overall_confidence:.2f}",
             f"- **Summary**: {verdict.summary}",
             f"- Critical issues: {verdict.critical_issues_count}",
             f"- High issues: {verdict.high_issues_count}",
-            f"",
+            "",
         ]
 
     if state.errors:
@@ -91,27 +89,27 @@ def write_human_decision_report(
     report_path = output_path / f"human_decisions_{state.run_id}.md"
     lines: list[str] = [
         f"# Human Decision Required — Run {state.run_id}",
-        f"",
-        f"The following files require human review.",
-        f"",
+        "",
+        "The following files require human review.",
+        "",
     ]
 
     for req_id, req in state.human_decision_requests.items():
         rec_val = req.analyst_recommendation.value if hasattr(req.analyst_recommendation, "value") else req.analyst_recommendation
         lines += [
             f"## {req.file_path} (priority={req.priority})",
-            f"",
+            "",
             f"**Context**: {req.context_summary}",
-            f"",
+            "",
             f"**Upstream changes**: {req.upstream_change_summary}",
-            f"",
+            "",
             f"**Fork changes**: {req.fork_change_summary}",
-            f"",
+            "",
             f"**Analyst recommendation**: {rec_val} (confidence: {req.analyst_confidence:.2f})",
-            f"",
+            "",
             f"**Rationale**: {req.analyst_rationale}",
-            f"",
-            f"### Options",
+            "",
+            "### Options",
         ]
         for opt in req.options:
             opt_dec = opt.decision.value if hasattr(opt.decision, "value") else opt.decision

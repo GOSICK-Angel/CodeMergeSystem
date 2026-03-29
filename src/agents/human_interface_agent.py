@@ -7,7 +7,6 @@ from src.models.plan import MergePhase
 from src.models.decision import MergeDecision
 from src.models.human import HumanDecisionRequest
 from src.models.state import MergeState
-from src.tools.report_writer import write_human_decision_report
 
 
 class HumanInterfaceAgent(BaseAgent):
@@ -36,8 +35,6 @@ class HumanInterfaceAgent(BaseAgent):
         requests: list[HumanDecisionRequest],
         output_path: str,
     ) -> str:
-        from src.models.state import MergeState, SystemStatus
-        from src.models.config import MergeConfig
 
         report_lines = [
             "# Human Decision Report",
@@ -81,7 +78,7 @@ class HumanInterfaceAgent(BaseAgent):
             print(f"\n{'='*60}")
             print(f"File: {req.file_path}")
             print(f"Context: {req.context_summary}")
-            print(f"\nOptions:")
+            print("\nOptions:")
             for opt in req.options:
                 opt_dec = opt.decision.value if hasattr(opt.decision, "value") else opt.decision
                 print(f"  {opt.option_key}: {opt_dec} - {opt.description}")

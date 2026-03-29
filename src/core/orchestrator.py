@@ -4,7 +4,7 @@ from src.models.config import MergeConfig
 from src.models.state import MergeState, SystemStatus, PhaseResult
 from src.models.plan import MergePhase
 from src.models.diff import FileDiff, RiskLevel, FileStatus
-from src.models.decision import MergeDecision, FileDecisionRecord, DecisionSource
+from src.models.decision import MergeDecision
 from src.models.dispute import PlanDisputeRequest
 from src.models.plan_judge import PlanJudgeResult
 from src.models.human import HumanDecisionRequest, DecisionOption
@@ -21,7 +21,11 @@ from src.core.checkpoint import Checkpoint
 from src.core.phase_runner import PhaseRunner
 from src.tools.git_tool import GitTool
 from src.tools.diff_parser import build_file_diff, detect_language
-from src.tools.file_classifier import compute_risk_score, classify_file, is_security_sensitive
+from src.tools.file_classifier import (
+    compute_risk_score,
+    classify_file,
+    is_security_sensitive,
+)
 from src.tools.report_writer import write_markdown_report, write_json_report
 
 
@@ -35,7 +39,9 @@ class Orchestrator:
 
         self.planner = PlannerAgent(config.agents.planner)
         self.planner_judge = PlannerJudgeAgent(config.agents.planner_judge)
-        self.conflict_analyst = ConflictAnalystAgent(config.agents.conflict_analyst, git_tool=git_tool)
+        self.conflict_analyst = ConflictAnalystAgent(
+            config.agents.conflict_analyst, git_tool=git_tool
+        )
         self.executor = ExecutorAgent(config.agents.executor, git_tool=git_tool)
         self.judge = JudgeAgent(config.agents.judge, git_tool=git_tool)
         self.human_interface = HumanInterfaceAgent(config.agents.human_interface)
@@ -83,11 +89,15 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Orchestration failed: {e}", exc_info=True)
-            state.errors.append({
-                "timestamp": datetime.now().isoformat(),
-                "phase": state.current_phase.value if hasattr(state.current_phase, "value") else str(state.current_phase),
-                "message": str(e),
-            })
+            state.errors.append(
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "phase": state.current_phase.value
+                    if hasattr(state.current_phase, "value")
+                    else str(state.current_phase),
+                    "message": str(e),
+                }
+            )
             try:
                 self.state_machine.transition(state, SystemStatus.FAILED, str(e))
             except ValueError:
@@ -102,11 +112,15 @@ class Orchestrator:
         )
         object.__setattr__(state, "_merge_base", merge_base)
 
-        changed_files = self.git_tool.get_changed_files(merge_base, state.config.fork_ref)
+        changed_files = self.git_tool.get_changed_files(
+            merge_base, state.config.fork_ref
+        )
         file_diffs: list[FileDiff] = []
 
         for status_char, file_path in changed_files:
-            raw_diff = self.git_tool.get_unified_diff(merge_base, state.config.fork_ref, file_path)
+            raw_diff = self.git_tool.get_unified_diff(
+                merge_base, state.config.fork_ref, file_path
+            )
             file_status = _parse_file_status(status_char)
             language = detect_language(file_path)
 
@@ -125,7 +139,9 @@ class Orchestrator:
             file_diffs.append(fd)
 
         object.__setattr__(state, "_file_diffs", file_diffs)
-        self.state_machine.transition(state, SystemStatus.PLANNING, "initialization complete")
+        self.state_machine.transition(
+            state, SystemStatus.PLANNING, "initialization complete"
+        )
 
     async def _run_phase1(self, state: MergeState) -> None:
         state.current_phase = MergePhase.ANALYSIS
@@ -142,9 +158,13 @@ class Orchestrator:
                 update={"status": "completed", "completed_at": datetime.now()}
             )
             state.phase_results[MergePhase.ANALYSIS.value] = phase_result
-            self.state_machine.transition(state, SystemStatus.PLAN_REVIEWING, "phase 1 complete")
+            self.state_machine.transition(
+                state, SystemStatus.PLAN_REVIEWING, "phase 1 complete"
+            )
         except Exception as e:
-            phase_result = phase_result.model_copy(update={"status": "failed", "error": str(e)})
+            phase_result = phase_result.model_copy(
+                update={"status": "failed", "error": str(e)}
+            )
             state.phase_results[MergePhase.ANALYSIS.value] = phase_result
             raise
 
@@ -161,7 +181,6 @@ class Orchestrator:
 
         for round_num in range(self.config.max_plan_revision_rounds + 1):
             state.plan_revision_rounds = round_num
-            readonly = ReadOnlyStateView(state)
 
             verdict = await self.planner_judge.review_plan(
                 state.merge_plan, file_diffs, round_num
@@ -173,18 +192,23 @@ class Orchestrator:
                     update={"status": "completed", "completed_at": datetime.now()}
                 )
                 state.phase_results[MergePhase.PLAN_REVIEW.value] = phase_result
-                self.state_machine.transition(state, SystemStatus.AUTO_MERGING, "plan approved")
+                self.state_machine.transition(
+                    state, SystemStatus.AUTO_MERGING, "plan approved"
+                )
                 return
 
             elif verdict.result == PlanJudgeResult.CRITICAL_REPLAN:
-                self.state_machine.transition(state, SystemStatus.PLANNING, "critical replan required")
+                self.state_machine.transition(
+                    state, SystemStatus.PLANNING, "critical replan required"
+                )
                 await self._run_phase1(state)
                 return
 
             elif round_num < self.config.max_plan_revision_rounds:
                 self.state_machine.transition(
-                    state, SystemStatus.PLAN_REVISING,
-                    f"revision needed (round {round_num + 1}/{self.config.max_plan_revision_rounds})"
+                    state,
+                    SystemStatus.PLAN_REVISING,
+                    f"revision needed (round {round_num + 1}/{self.config.max_plan_revision_rounds})",
                 )
                 state.current_phase = MergePhase.PLAN_REVISING
                 revised_plan = await self.planner.revise_plan(state, verdict.issues)
@@ -194,7 +218,9 @@ class Orchestrator:
                     for batch in revised_plan.phases
                     for fp in batch.file_paths
                 }
-                self.state_machine.transition(state, SystemStatus.PLAN_REVIEWING, "revision complete")
+                self.state_machine.transition(
+                    state, SystemStatus.PLAN_REVIEWING, "revision complete"
+                )
                 state.current_phase = MergePhase.PLAN_REVIEW
             else:
                 phase_result = phase_result.model_copy(
@@ -202,8 +228,9 @@ class Orchestrator:
                 )
                 state.phase_results[MergePhase.PLAN_REVIEW.value] = phase_result
                 self.state_machine.transition(
-                    state, SystemStatus.AWAITING_HUMAN,
-                    "plan review exceeded max revision rounds"
+                    state,
+                    SystemStatus.AWAITING_HUMAN,
+                    "plan review exceeded max revision rounds",
                 )
                 return
 
@@ -220,7 +247,7 @@ class Orchestrator:
             raise ValueError("No merge plan available for phase 2")
 
         file_diffs_map: dict[str, FileDiff] = {}
-        for fd in (getattr(state, "_file_diffs", None) or []):
+        for fd in getattr(state, "_file_diffs", None) or []:
             file_diffs_map[fd.file_path] = fd
 
         auto_safe_files: list[str] = []
@@ -262,11 +289,15 @@ class Orchestrator:
             await self._handle_plan_dispute(state, state.plan_disputes[-1])
         elif has_risky:
             self.state_machine.transition(
-                state, SystemStatus.ANALYZING_CONFLICTS, "proceeding to conflict analysis"
+                state,
+                SystemStatus.ANALYZING_CONFLICTS,
+                "proceeding to conflict analysis",
             )
         else:
             self.state_machine.transition(
-                state, SystemStatus.JUDGE_REVIEWING, "no risky files, skip to judge review"
+                state,
+                SystemStatus.JUDGE_REVIEWING,
+                "no risky files, skip to judge review",
             )
 
     async def _run_phase3(self, state: MergeState) -> None:
@@ -281,7 +312,7 @@ class Orchestrator:
         await self.conflict_analyst.run(state)
 
         file_diffs_map: dict[str, FileDiff] = {}
-        for fd in (getattr(state, "_file_diffs", None) or []):
+        for fd in getattr(state, "_file_diffs", None) or []:
             file_diffs_map[fd.file_path] = fd
 
         needs_human: list[str] = []
@@ -311,7 +342,9 @@ class Orchestrator:
 
         if needs_human:
             self.state_machine.transition(
-                state, SystemStatus.AWAITING_HUMAN, f"{len(needs_human)} files need human review"
+                state,
+                SystemStatus.AWAITING_HUMAN,
+                f"{len(needs_human)} files need human review",
             )
         else:
             self.state_machine.transition(
@@ -332,6 +365,7 @@ class Orchestrator:
         verdict = msg.payload.get("verdict")
         if verdict:
             from src.models.judge import JudgeVerdict
+
             state.judge_verdict = JudgeVerdict.model_validate(verdict)
 
         phase_result = phase_result.model_copy(
@@ -341,11 +375,14 @@ class Orchestrator:
 
         if state.judge_verdict is None:
             self.state_machine.transition(
-                state, SystemStatus.GENERATING_REPORT, "judge review complete (no verdict)"
+                state,
+                SystemStatus.GENERATING_REPORT,
+                "judge review complete (no verdict)",
             )
             return
 
         from src.models.judge import VerdictType
+
         verdict_type = state.judge_verdict.verdict
         if verdict_type == VerdictType.PASS:
             self.state_machine.transition(
@@ -381,14 +418,20 @@ class Orchestrator:
                 update={"status": "completed", "completed_at": datetime.now()}
             )
             state.phase_results[MergePhase.REPORT.value] = phase_result
-            self.state_machine.transition(state, SystemStatus.COMPLETED, "reports generated")
+            self.state_machine.transition(
+                state, SystemStatus.COMPLETED, "reports generated"
+            )
         except Exception as e:
-            state.errors.append({
-                "timestamp": datetime.now().isoformat(),
-                "phase": "report",
-                "message": f"Report generation failed (non-blocking): {e}",
-            })
-            phase_result = phase_result.model_copy(update={"status": "completed", "error": str(e)})
+            state.errors.append(
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "phase": "report",
+                    "message": f"Report generation failed (non-blocking): {e}",
+                }
+            )
+            phase_result = phase_result.model_copy(
+                update={"status": "completed", "error": str(e)}
+            )
             state.phase_results[MergePhase.REPORT.value] = phase_result
             self.state_machine.transition(
                 state, SystemStatus.COMPLETED, "reports failed but marking complete"
@@ -405,7 +448,9 @@ class Orchestrator:
             state.merge_plan = revised_plan
 
             file_diffs: list[FileDiff] = getattr(state, "_file_diffs", []) or []
-            self.state_machine.transition(state, SystemStatus.PLAN_REVIEWING, "dispute revision complete")
+            self.state_machine.transition(
+                state, SystemStatus.PLAN_REVIEWING, "dispute revision complete"
+            )
 
             verdict = await self.planner_judge.review_plan(revised_plan, file_diffs, 0)
             state.plan_judge_verdict = verdict
@@ -418,7 +463,9 @@ class Orchestrator:
                 )
             else:
                 self.state_machine.transition(
-                    state, SystemStatus.AWAITING_HUMAN, "dispute could not be resolved automatically"
+                    state,
+                    SystemStatus.AWAITING_HUMAN,
+                    "dispute could not be resolved automatically",
                 )
         except Exception as e:
             logger.error(f"Plan dispute handling failed: {e}")
@@ -465,6 +512,7 @@ def _select_merge_strategy(analysis, thresholds) -> MergeDecision:
 
 def _build_human_decision_request(fd: FileDiff, analysis) -> HumanDecisionRequest:
     from datetime import datetime
+
     rec_val = analysis.recommended_strategy
 
     options = [

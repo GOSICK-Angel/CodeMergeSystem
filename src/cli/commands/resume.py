@@ -2,7 +2,7 @@ import asyncio
 import sys
 from pathlib import Path
 from rich.console import Console
-from src.models.state import MergeState, SystemStatus
+from src.models.state import SystemStatus
 from src.core.checkpoint import Checkpoint
 from src.core.orchestrator import Orchestrator
 
@@ -46,16 +46,16 @@ def resume_command_impl(run_id: str | None, checkpoint_path: str | None) -> None
 
     final_status = final_state.status.value if hasattr(final_state.status, "value") else str(final_state.status)
     if final_state.status == SystemStatus.COMPLETED:
-        console.print(f"[green]Merge completed successfully![/green]")
+        console.print("[green]Merge completed successfully![/green]")
     elif final_state.status == SystemStatus.AWAITING_HUMAN:
-        console.print(f"[yellow]Still awaiting human decisions[/yellow]")
+        console.print("[yellow]Still awaiting human decisions[/yellow]")
         pending = [
             fp for fp, req in final_state.human_decision_requests.items()
             if req.human_decision is None
         ]
         console.print(f"  Pending: {len(pending)} files")
     elif final_state.status == SystemStatus.FAILED:
-        console.print(f"[red]Run failed[/red]")
+        console.print("[red]Run failed[/red]")
         for err in final_state.errors[-3:]:
             console.print(f"  Error: {err.get('message', '')}")
         sys.exit(1)

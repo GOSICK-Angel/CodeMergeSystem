@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 import git
 from git import Repo, InvalidGitRepositoryError

@@ -1,4 +1,3 @@
-import asyncio
 import os
 import sys
 import yaml
@@ -6,9 +5,7 @@ import click
 from pathlib import Path
 from rich.console import Console
 from src.models.config import MergeConfig
-from src.models.state import MergeState, SystemStatus
 from src.core.checkpoint import Checkpoint
-from src.core.orchestrator import Orchestrator
 from src.tools.report_writer import write_markdown_report, write_json_report
 
 

@@ -1,10 +1,8 @@
 import asyncio
 import sys
 import yaml
-import click
 from pathlib import Path
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
 from src.models.config import MergeConfig
 from src.models.state import MergeState, SystemStatus
 from src.core.orchestrator import Orchestrator
@@ -43,13 +41,13 @@ def run_command_impl(config_path: str, dry_run: bool) -> None:
 
     status_val = final_state.status.value if hasattr(final_state.status, "value") else str(final_state.status)
     if final_state.status == SystemStatus.COMPLETED:
-        console.print(f"[green]Merge completed successfully![/green]")
+        console.print("[green]Merge completed successfully![/green]")
     elif final_state.status == SystemStatus.AWAITING_HUMAN:
-        console.print(f"[yellow]Paused: awaiting human decisions[/yellow]")
+        console.print("[yellow]Paused: awaiting human decisions[/yellow]")
         console.print(f"  Run ID: {final_state.run_id}")
         console.print(f"  Resume with: merge resume --run-id {final_state.run_id}")
     elif final_state.status == SystemStatus.FAILED:
-        console.print(f"[red]Merge failed[/red]")
+        console.print("[red]Merge failed[/red]")
         for err in final_state.errors:
             console.print(f"  Error: {err.get('message', '')}")
         sys.exit(1)

@@ -1,7 +1,5 @@
 from datetime import datetime
 from src.models.state import MergeState, SystemStatus
-from src.models.message import AgentType, AgentMessage, MessageType
-from src.models.plan import MergePhase
 
 
 VALID_TRANSITIONS: dict[SystemStatus, list[SystemStatus]] = {

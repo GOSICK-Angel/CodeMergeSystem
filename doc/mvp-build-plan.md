@@ -3,7 +3,7 @@
 > **本文档用途**：供新会话直接执行的完整实施指南。所有设计决策已在以下文档中确定，
 > 实现时**必须与之保持一致，不得偏移**：
 > - `doc/architecture.md` — 目录结构、技术栈
-> - `doc/agents.md` — 6 个 Agent 职责、LLM 配置、质疑机制、无超时默认策略
+> - `doc/agents-design.md` — 6 个 Agent 职责、LLM 配置、质疑机制、无超时默认策略
 > - `doc/data-models.md` — 所有 Pydantic 模型定义（权威来源）
 > - `doc/flow.md` — 状态机、6 Phase 流程、Mermaid 图
 > - `doc/implementation-plan.md` — 算法设计、Prompt 框架、YAML 配置模板
@@ -34,9 +34,9 @@
 
 | 禁止行为 | 原因 | 来源文档 |
 |---------|------|---------|
-| 超时后以默认策略替代人工决策 | 静默误合，违反"不确定即升级"原则 | `agents.md §7.3` |
-| Executor 私自提升/降低风险分类 | 只能通过 PlanDisputeRequest 请求修订 | `agents.md §2.3` |
-| Judge/PlannerJudge 写入任何文件 | 审查隔离原则，ReadOnlyStateView 强制阻止 | `agents.md §6` |
+| 超时后以默认策略替代人工决策 | 静默误合，违反"不确定即升级"原则 | `agents-design.md §7.3` |
+| Executor 私自提升/降低风险分类 | 只能通过 PlanDisputeRequest 请求修订 | `agents-design.md §2.3` |
+| Judge/PlannerJudge 写入任何文件 | 审查隔离原则，ReadOnlyStateView 强制阻止 | `agents-design.md §6` |
 | 跳过或忽略未解决冲突 | 必须记录到 FileDecisionRecord 或升级人工 | `flow.md §3.3` |
 | 默认"目标分支优先"或"当前分支优先" | 必须按语义决策 | `architecture.md §P2` |
 | `DecisionSource.TIMEOUT_DEFAULT` | 已从枚举中移除，不得使用 | `data-models.md §5` |

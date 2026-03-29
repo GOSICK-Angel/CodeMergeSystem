@@ -10,7 +10,10 @@ from src.models.diff import FileStatus
 from src.models.human import HumanDecisionRequest
 from src.models.dispute import PlanDisputeRequest
 from src.models.state import MergeState
-from src.llm.prompts.executor_prompts import EXECUTOR_SYSTEM, build_semantic_merge_prompt
+from src.llm.prompts.executor_prompts import (
+    EXECUTOR_SYSTEM,
+    build_semantic_merge_prompt,
+)
 from src.llm.response_parser import parse_merge_result
 from src.tools.patch_applier import apply_with_snapshot, create_escalate_record
 from src.tools.git_tool import GitTool
@@ -39,7 +42,7 @@ class ExecutorAgent(BaseAgent):
 
         file_diffs_map: dict[str, FileDiff] = {}
         if hasattr(state, "_file_diffs"):
-            for fd in (state._file_diffs or []):
+            for fd in state._file_diffs or []:
                 file_diffs_map[fd.file_path] = fd
 
         for batch in state.merge_plan.phases:
@@ -82,10 +85,16 @@ class ExecutorAgent(BaseAgent):
                 agent="executor",
             )
 
-        current_phase_str = state.current_phase.value if hasattr(state.current_phase, "value") else str(state.current_phase)
+        current_phase_str = (
+            state.current_phase.value
+            if hasattr(state.current_phase, "value")
+            else str(state.current_phase)
+        )
 
         if strategy == MergeDecision.TAKE_TARGET:
-            content = self.git_tool.get_file_content(state.config.upstream_ref, file_diff.file_path)
+            content = self.git_tool.get_file_content(
+                state.config.upstream_ref, file_diff.file_path
+            )
             if content is None:
                 return create_escalate_record(
                     file_diff.file_path,
@@ -104,7 +113,9 @@ class ExecutorAgent(BaseAgent):
             )
 
         elif strategy == MergeDecision.TAKE_CURRENT:
-            content = self.git_tool.get_file_content(state.config.fork_ref, file_diff.file_path)
+            content = self.git_tool.get_file_content(
+                state.config.fork_ref, file_diff.file_path
+            )
             if content is None:
                 return create_escalate_record(
                     file_diff.file_path,
@@ -152,8 +163,12 @@ class ExecutorAgent(BaseAgent):
                 "No git tool available",
             )
 
-        current_content = self.git_tool.get_file_content(state.config.fork_ref, file_diff.file_path)
-        target_content = self.git_tool.get_file_content(state.config.upstream_ref, file_diff.file_path)
+        current_content = self.git_tool.get_file_content(
+            state.config.fork_ref, file_diff.file_path
+        )
+        target_content = self.git_tool.get_file_content(
+            state.config.upstream_ref, file_diff.file_path
+        )
 
         if current_content is None or target_content is None:
             return create_escalate_record(
@@ -179,7 +194,11 @@ class ExecutorAgent(BaseAgent):
                 f"Semantic merge LLM call failed: {e}",
             )
 
-        current_phase_str = state.current_phase.value if hasattr(state.current_phase, "value") else str(state.current_phase)
+        current_phase_str = (
+            state.current_phase.value
+            if hasattr(state.current_phase, "value")
+            else str(state.current_phase)
+        )
         return await apply_with_snapshot(
             file_diff.file_path,
             merged_content,
@@ -203,7 +222,11 @@ class ExecutorAgent(BaseAgent):
                 "Human decision not provided",
             )
 
-        current_phase_str = state.current_phase.value if hasattr(state.current_phase, "value") else str(state.current_phase)
+        current_phase_str = (
+            state.current_phase.value
+            if hasattr(state.current_phase, "value")
+            else str(state.current_phase)
+        )
 
         if request.human_decision == MergeDecision.MANUAL_PATCH:
             if not request.custom_content:
@@ -226,12 +249,11 @@ class ExecutorAgent(BaseAgent):
 
         fd_map: dict[str, FileDiff] = {}
         if hasattr(state, "_file_diffs"):
-            for fd in (state._file_diffs or []):
+            for fd in state._file_diffs or []:
                 fd_map[fd.file_path] = fd
 
         fd = fd_map.get(request.file_path)
         if fd is None:
-            from src.models.diff import FileDiff, RiskLevel
             fd = FileDiff(
                 file_path=request.file_path,
                 file_status=FileStatus.MODIFIED,
@@ -264,7 +286,11 @@ class ExecutorAgent(BaseAgent):
         impact: str,
         state: MergeState,
     ) -> PlanDisputeRequest:
-        current_phase_str = state.current_phase.value if hasattr(state.current_phase, "value") else str(state.current_phase)
+        current_phase_str = (
+            state.current_phase.value
+            if hasattr(state.current_phase, "value")
+            else str(state.current_phase)
+        )
 
         dispute = PlanDisputeRequest(
             raised_by=AgentType.EXECUTOR.value,
@@ -280,4 +306,8 @@ class ExecutorAgent(BaseAgent):
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus
-        return state.status in (SystemStatus.AUTO_MERGING, SystemStatus.ANALYZING_CONFLICTS)
+
+        return state.status in (
+            SystemStatus.AUTO_MERGING,
+            SystemStatus.ANALYZING_CONFLICTS,
+        )
