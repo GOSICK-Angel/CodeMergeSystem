@@ -1541,7 +1541,7 @@ class TestJudgeAgent:
             new=AsyncMock(side_effect=RuntimeError("error")),
         ):
             issues = asyncio.get_event_loop().run_until_complete(
-                self.agent.review_file("src/main.py", "clean content", record, fd)
+                self.agent.review_file("src/main.py", "x = 1\n", record, fd)
             )
 
         assert issues == []

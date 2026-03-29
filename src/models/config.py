@@ -108,6 +108,25 @@ class OutputConfig(BaseModel):
     include_llm_traces: bool = False
 
 
+class SyntaxCheckConfig(BaseModel):
+    enabled: bool = True
+    languages: list[str] = Field(default_factory=lambda: ["python", "json", "yaml"])
+
+
+class LLMRiskScoringConfig(BaseModel):
+    enabled: bool = False
+    gray_zone_low: float = Field(default=0.25, ge=0.0, le=1.0)
+    gray_zone_high: float = Field(default=0.65, ge=0.0, le=1.0)
+    rule_weight: float = Field(default=0.6, ge=0.0, le=1.0)
+
+
+class GitHubConfig(BaseModel):
+    enabled: bool = False
+    token_env: str = "GITHUB_TOKEN"
+    repo: str = ""
+    pr_number: int | None = None
+
+
 class MergeConfig(BaseModel):
     upstream_ref: str = Field(
         ..., description="upstream branch ref, e.g. upstream/main"
@@ -131,6 +150,9 @@ class MergeConfig(BaseModel):
     thresholds: ThresholdConfig = Field(default_factory=ThresholdConfig)
     file_classifier: FileClassifierConfig = Field(default_factory=FileClassifierConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
+    syntax_check: SyntaxCheckConfig = Field(default_factory=SyntaxCheckConfig)
+    llm_risk_scoring: LLMRiskScoringConfig = Field(default_factory=LLMRiskScoringConfig)
+    github: GitHubConfig = Field(default_factory=GitHubConfig)
 
     @field_validator("upstream_ref", "fork_ref")
     @classmethod

@@ -15,6 +15,7 @@ from src.llm.prompts.judge_prompts import (
 )
 from src.llm.response_parser import parse_file_review_issues, parse_judge_verdict
 from src.tools.git_tool import GitTool
+from src.tools.syntax_checker import check_syntax as check_file_syntax
 
 
 class JudgeAgent(BaseAgent):
@@ -83,6 +84,25 @@ class JudgeAgent(BaseAgent):
         original_diff: FileDiff,
         project_context: str = "",
     ) -> list[JudgeIssue]:
+        issues: list[JudgeIssue] = []
+
+        syntax_result = check_file_syntax(file_path, merged_content)
+        if not syntax_result.valid:
+            for syn_err in syntax_result.errors:
+                issues.append(
+                    JudgeIssue(
+                        file_path=file_path,
+                        issue_level=IssueSeverity.CRITICAL,
+                        issue_type="syntax_error",
+                        description=(
+                            f"Syntax error at line {syn_err.line}, "
+                            f"col {syn_err.column}: {syn_err.message}"
+                        ),
+                        affected_lines=[syn_err.line] if syn_err.line > 0 else [],
+                        must_fix_before_merge=True,
+                    )
+                )
+
         prompt = build_file_review_prompt(
             file_path,
             merged_content,
@@ -94,10 +114,10 @@ class JudgeAgent(BaseAgent):
 
         try:
             raw = await self._call_llm_with_retry(messages, system=JUDGE_SYSTEM)
-            issues = parse_file_review_issues(str(raw), file_path)
+            llm_issues = parse_file_review_issues(str(raw), file_path)
+            issues.extend(llm_issues)
         except Exception as e:
             self.logger.error(f"File review failed for {file_path}: {e}")
-            issues = []
 
         conflict_markers = ["<<<<<<<", "=======", ">>>>>>>"]
         for marker in conflict_markers:

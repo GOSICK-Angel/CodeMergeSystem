@@ -1,7 +1,13 @@
 import fnmatch
+import json as json_lib
+import logging
 from pathlib import Path
+from typing import Any
+
 from src.models.diff import FileDiff, RiskLevel, FileStatus
 from src.models.config import FileClassifierConfig
+
+logger = logging.getLogger(__name__)
 
 
 def matches_any_pattern(file_path: str, patterns: list[str]) -> bool:
@@ -92,6 +98,41 @@ def compute_risk_score(file_diff: FileDiff, config: FileClassifierConfig) -> flo
         return float(max(raw_score, 0.8))
 
     return float(round(raw_score, 3))
+
+
+async def compute_llm_risk_score(
+    file_diff: FileDiff,
+    llm_client: Any,
+    rule_score: float,
+    rule_weight: float = 0.6,
+) -> float:
+    from src.llm.prompts.risk_scoring_prompts import (
+        build_risk_scoring_prompt,
+        RISK_SCORING_SYSTEM,
+    )
+
+    prompt = build_risk_scoring_prompt(file_diff, rule_score)
+    messages = [{"role": "user", "content": prompt}]
+
+    try:
+        raw = await llm_client.complete(messages, system=RISK_SCORING_SYSTEM)
+        raw_str = str(raw).strip()
+        if raw_str.startswith("```"):
+            lines = raw_str.splitlines()
+            raw_str = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+        data = json_lib.loads(raw_str)
+        llm_score = float(data.get("llm_risk_score", rule_score))
+        llm_score = max(0.0, min(1.0, llm_score))
+    except Exception as e:
+        logger.warning(
+            "LLM risk scoring failed for %s: %s, falling back to rule score",
+            file_diff.file_path,
+            e,
+        )
+        return rule_score
+
+    blended = rule_weight * rule_score + (1.0 - rule_weight) * llm_score
+    return float(round(max(0.0, min(1.0, blended)), 3))
 
 
 def is_security_sensitive(file_path: str, config: FileClassifierConfig) -> bool:

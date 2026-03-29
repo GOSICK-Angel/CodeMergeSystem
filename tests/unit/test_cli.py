@@ -84,7 +84,7 @@ class TestRunCommand:
         config_file.write_text("not: valid: yaml: [")
         runner = CliRunner()
         result = runner.invoke(cli, ["run", "--config", str(config_file)])
-        assert result.exit_code == 1
+        assert result.exit_code == 40
 
     def test_run_command_config_missing_required_fields(self, tmp_path):
         from src.cli.main import cli
@@ -93,7 +93,7 @@ class TestRunCommand:
         config_file.write_text("repo_path: .")
         runner = CliRunner()
         result = runner.invoke(cli, ["run", "--config", str(config_file)])
-        assert result.exit_code == 1
+        assert result.exit_code == 40
 
     def test_run_command_completed_status(self, tmp_path):
         from src.cli.main import cli

@@ -8,6 +8,7 @@ from src.models.plan import MergePhase
 from src.models.decision import MergeDecision
 from src.models.human import HumanDecisionRequest
 from src.models.state import MergeState
+from src.tools.conflict_grouper import ConflictGroup
 
 
 class HumanInterfaceAgent(BaseAgent):
@@ -36,12 +37,31 @@ class HumanInterfaceAgent(BaseAgent):
         self,
         requests: list[HumanDecisionRequest],
         output_path: str,
+        groups: list[ConflictGroup] | None = None,
     ) -> str:
 
         report_lines = [
             "# Human Decision Report",
             "",
         ]
+
+        if groups:
+            report_lines += [
+                "## Batch Decision Groups",
+                "",
+            ]
+            for group in groups:
+                report_lines += [
+                    f"### {group.pattern_description}",
+                    f"- **Type**: {group.conflict_type.value}",
+                    f"- **Files** ({len(group.file_paths)}):",
+                ]
+                for fp in group.file_paths:
+                    report_lines.append(f"  - {fp}")
+                report_lines += [
+                    f"- **Representative**: {group.representative_file}",
+                    "",
+                ]
 
         for req in requests:
             rec_val = (
@@ -170,6 +190,7 @@ class HumanInterfaceAgent(BaseAgent):
         self,
         yaml_path: str,
         requests: list[HumanDecisionRequest],
+        groups: list[ConflictGroup] | None = None,
     ) -> list[HumanDecisionRequest]:
         from datetime import datetime
 
@@ -220,6 +241,123 @@ class HumanInterfaceAgent(BaseAgent):
                     "decided_at": datetime.now(),
                 }
             )
+
+        group_decisions_raw: list[dict[str, Any]] = (
+            raw.get("group_decisions", []) if isinstance(raw, dict) else []
+        )
+        if group_decisions_raw and groups:
+            for gd in group_decisions_raw:
+                gd_type = gd.get("conflict_type", "")
+                gd_decision_raw = gd.get("decision", "")
+                gd_notes = gd.get("reviewer_notes", "")
+
+                try:
+                    gd_decision = MergeDecision(gd_decision_raw)
+                except ValueError:
+                    self.logger.warning(
+                        f"Invalid group decision value '{gd_decision_raw}'"
+                    )
+                    continue
+
+                if not self._validate_decision_value(gd_decision):
+                    continue
+
+                matching_groups = [
+                    g for g in groups if g.conflict_type.value == gd_type
+                ]
+                for group in matching_groups:
+                    for i, req in enumerate(results):
+                        if (
+                            req.file_path in group.file_paths
+                            and req.human_decision is None
+                        ):
+                            results[i] = req.model_copy(
+                                update={
+                                    "human_decision": gd_decision,
+                                    "is_batch_decision": True,
+                                    "reviewer_notes": gd_notes
+                                    or (f"Group decision for {gd_type}"),
+                                    "decided_at": datetime.now(),
+                                }
+                            )
+
+        return results
+
+    async def collect_batch_decisions_cli(
+        self,
+        requests: list[HumanDecisionRequest],
+        groups: list[ConflictGroup],
+    ) -> list[HumanDecisionRequest]:
+        """Collect batch decisions for grouped similar conflicts."""
+        from datetime import datetime
+
+        results = list(requests)
+
+        for group in groups:
+            print(f"\n{'=' * 60}")
+            print(f"Batch: {group.pattern_description}")
+            print(f"Files ({len(group.file_paths)}):")
+            for fp in group.file_paths:
+                print(f"  - {fp}")
+
+            rep_req = next(
+                (r for r in results if r.file_path == group.representative_file),
+                None,
+            )
+            if rep_req is None:
+                continue
+
+            print(f"\nRepresentative: {group.representative_file}")
+            print("Options:")
+            for opt in rep_req.options:
+                opt_dec = (
+                    opt.decision.value
+                    if hasattr(opt.decision, "value")
+                    else opt.decision
+                )
+                print(f"  {opt.option_key}: {opt_dec} - {opt.description}")
+
+            print(
+                "\nApply same decision to all files in this group? "
+                "Enter option key (or Enter to skip):",
+                end=" ",
+            )
+            try:
+                user_input = input().strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+
+            if not user_input:
+                continue
+
+            selected = next(
+                (
+                    o
+                    for o in rep_req.options
+                    if o.option_key.lower() == user_input.lower()
+                ),
+                None,
+            )
+            if selected is None:
+                print(f"Unknown option '{user_input}', skipping group.")
+                continue
+
+            if not self._validate_decision_value(selected.decision):
+                continue
+
+            for i, req in enumerate(results):
+                if req.file_path in group.file_paths and req.human_decision is None:
+                    results[i] = req.model_copy(
+                        update={
+                            "human_decision": selected.decision,
+                            "is_batch_decision": True,
+                            "reviewer_notes": (
+                                f"Batch decision from group: "
+                                f"{group.pattern_description}"
+                            ),
+                            "decided_at": datetime.now(),
+                        }
+                    )
 
         return results
 

@@ -11,6 +11,8 @@ from src.tools.diff_parser import (
 )
 from src.tools.patch_applier import apply_with_snapshot, create_escalate_record
 from src.tools.report_writer import write_markdown_report, write_json_report
+from src.tools.syntax_checker import check_syntax, SyntaxCheckResult, SyntaxError_
+from src.tools.conflict_grouper import ConflictGroup, group_similar_conflicts
 
 __all__ = [
     "GitTool",
@@ -24,4 +26,9 @@ __all__ = [
     "create_escalate_record",
     "write_markdown_report",
     "write_json_report",
+    "check_syntax",
+    "SyntaxCheckResult",
+    "SyntaxError_",
+    "ConflictGroup",
+    "group_similar_conflicts",
 ]

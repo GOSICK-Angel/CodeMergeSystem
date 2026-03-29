@@ -10,7 +10,11 @@ from src.core.orchestrator import Orchestrator
 console = Console()
 
 
-def resume_command_impl(run_id: str | None, checkpoint_path: str | None) -> None:
+def resume_command_impl(
+    run_id: str | None,
+    checkpoint_path: str | None,
+    decisions: str | None = None,
+) -> None:
     if checkpoint_path:
         cp_path = Path(checkpoint_path)
         if not cp_path.exists():
@@ -41,6 +45,42 @@ def resume_command_impl(run_id: str | None, checkpoint_path: str | None) -> None
         )
         return
 
+    if decisions and state.status == SystemStatus.AWAITING_HUMAN:
+        from src.agents.human_interface_agent import HumanInterfaceAgent
+
+        pending = [
+            req
+            for req in state.human_decision_requests.values()
+            if req.human_decision is None
+        ]
+        if pending:
+            hi = HumanInterfaceAgent(state.config.agents.human_interface)
+            updated = asyncio.run(hi.collect_decisions_file(decisions, pending))
+            decided_count = 0
+            for req in updated:
+                if req.human_decision is not None:
+                    state.human_decision_requests[req.file_path] = req
+                    state.human_decisions[req.file_path] = req.human_decision
+                    decided_count += 1
+            console.print(
+                f"[green]Loaded {decided_count} decisions from {decisions}[/green]"
+            )
+
+            still_pending = [
+                fp
+                for fp, req in state.human_decision_requests.items()
+                if req.human_decision is None
+            ]
+            if not still_pending:
+                from src.core.state_machine import StateMachine
+
+                sm = StateMachine()
+                sm.transition(
+                    state,
+                    SystemStatus.JUDGE_REVIEWING,
+                    "all human decisions collected from file",
+                )
+
     orchestrator = Orchestrator(state.config)
 
     async def execute() -> MergeState:
@@ -57,12 +97,12 @@ def resume_command_impl(run_id: str | None, checkpoint_path: str | None) -> None
         console.print("[green]Merge completed successfully![/green]")
     elif final_state.status == SystemStatus.AWAITING_HUMAN:
         console.print("[yellow]Still awaiting human decisions[/yellow]")
-        pending = [
+        remaining = [
             fp
             for fp, req in final_state.human_decision_requests.items()
             if req.human_decision is None
         ]
-        console.print(f"  Pending: {len(pending)} files")
+        console.print(f"  Pending: {len(remaining)} files")
     elif final_state.status == SystemStatus.FAILED:
         console.print("[red]Run failed[/red]")
         for err in final_state.errors[-3:]:

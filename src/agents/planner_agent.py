@@ -15,6 +15,7 @@ from src.llm.prompts.planner_prompts import (
 )
 from src.tools.file_classifier import compute_risk_score, classify_file
 import json
+import json as json_lib
 
 
 class PlannerAgent(BaseAgent):
@@ -46,6 +47,9 @@ class PlannerAgent(BaseAgent):
             all_file_diffs = state._file_diffs
         else:
             all_file_diffs = []
+
+        if state.config.llm_risk_scoring.enabled:
+            await self._enhance_risk_scores(all_file_diffs, state.config)
 
         project_context = state.config.project_context
 
@@ -319,6 +323,49 @@ class PlannerAgent(BaseAgent):
         ]
 
         return await self.revise_plan(state, issues)
+
+    async def _enhance_risk_scores(
+        self, file_diffs: list[FileDiff], config: MergeConfig
+    ) -> None:
+        from src.llm.prompts.risk_scoring_prompts import (
+            build_risk_scoring_prompt,
+            RISK_SCORING_SYSTEM,
+        )
+
+        gray_low = config.llm_risk_scoring.gray_zone_low
+        gray_high = config.llm_risk_scoring.gray_zone_high
+        rule_weight = config.llm_risk_scoring.rule_weight
+
+        for i, fd in enumerate(file_diffs):
+            if not (gray_low <= fd.risk_score <= gray_high):
+                continue
+
+            prompt = build_risk_scoring_prompt(fd, fd.risk_score)
+            messages = [{"role": "user", "content": prompt}]
+
+            try:
+                raw = await self._call_llm_with_retry(
+                    messages, system=RISK_SCORING_SYSTEM
+                )
+                raw_str = str(raw).strip()
+                if raw_str.startswith("```"):
+                    lines = raw_str.splitlines()
+                    raw_str = "\n".join(
+                        lines[1:-1] if lines[-1] == "```" else lines[1:]
+                    )
+                data = json_lib.loads(raw_str)
+                llm_score = max(
+                    0.0,
+                    min(1.0, float(data.get("llm_risk_score", fd.risk_score))),
+                )
+            except Exception:
+                continue
+
+            enhanced = rule_weight * fd.risk_score + (1.0 - rule_weight) * llm_score
+            enhanced = round(max(0.0, min(1.0, enhanced)), 3)
+            new_fd = fd.model_copy(update={"risk_score": enhanced})
+            new_level = classify_file(new_fd, config.file_classifier)
+            file_diffs[i] = new_fd.model_copy(update={"risk_level": new_level})
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus
