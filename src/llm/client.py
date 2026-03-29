@@ -1,7 +1,9 @@
 import os
 from abc import ABC, abstractmethod
+from typing import Any
 import anthropic
 import openai
+from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
 from src.models.config import AgentLLMConfig
 
@@ -13,13 +15,16 @@ class ParseError(Exception):
 class LLMClient(ABC):
     @abstractmethod
     async def complete(
-        self, messages: list[dict], system: str | None = None, **kwargs
+        self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
     ) -> str:
         pass
 
     @abstractmethod
     async def complete_structured(
-        self, messages: list[dict], schema: type[BaseModel], system: str | None = None
+        self,
+        messages: list[dict[str, Any]],
+        schema: type[BaseModel],
+        system: str | None = None,
     ) -> BaseModel:
         pass
 
@@ -40,9 +45,9 @@ class AnthropicClient(LLMClient):
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
 
     async def complete(
-        self, messages: list[dict], system: str | None = None, **kwargs
+        self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
     ) -> str:
-        kwargs_merged = {
+        kwargs_merged: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
@@ -53,10 +58,13 @@ class AnthropicClient(LLMClient):
         kwargs_merged.update(kwargs)
 
         response = await self._client.messages.create(**kwargs_merged)
-        return response.content[0].text
+        return str(response.content[0].text)
 
     async def complete_structured(
-        self, messages: list[dict], schema: type[BaseModel], system: str | None = None
+        self,
+        messages: list[dict[str, Any]],
+        schema: type[BaseModel],
+        system: str | None = None,
     ) -> BaseModel:
         import json
 
@@ -103,12 +111,13 @@ class OpenAIClient(LLMClient):
         self._client = openai.AsyncOpenAI(api_key=api_key)
 
     async def complete(
-        self, messages: list[dict], system: str | None = None, **kwargs
+        self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
     ) -> str:
-        all_messages: list[dict] = []
+        all_messages: list[ChatCompletionMessageParam] = []
         if system:
             all_messages.append({"role": "system", "content": system})
-        all_messages.extend(messages)
+        for msg in messages:
+            all_messages.append({"role": msg["role"], "content": msg["content"]})
 
         response = await self._client.chat.completions.create(
             model=self.model,
@@ -120,7 +129,10 @@ class OpenAIClient(LLMClient):
         return response.choices[0].message.content or ""
 
     async def complete_structured(
-        self, messages: list[dict], schema: type[BaseModel], system: str | None = None
+        self,
+        messages: list[dict[str, Any]],
+        schema: type[BaseModel],
+        system: str | None = None,
     ) -> BaseModel:
         import json
 

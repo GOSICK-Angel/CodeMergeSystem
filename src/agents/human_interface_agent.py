@@ -1,5 +1,6 @@
 import yaml
 from pathlib import Path
+from typing import Any
 from src.agents.base_agent import BaseAgent
 from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage, MessageType
@@ -177,7 +178,7 @@ class HumanInterfaceAgent(BaseAgent):
             raise FileNotFoundError(f"Decisions file not found: {yaml_path}")
 
         raw = yaml.safe_load(decisions_file.read_text(encoding="utf-8"))
-        decisions_map: dict[str, dict] = {
+        decisions_map: dict[str, dict[str, Any]] = {
             item["file_path"]: item
             for item in (raw.get("decisions", []) if isinstance(raw, dict) else [])
         }

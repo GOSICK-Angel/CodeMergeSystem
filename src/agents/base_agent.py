@@ -1,5 +1,6 @@
 import logging
 from abc import ABC, abstractmethod
+from typing import Any
 import asyncio
 from pydantic import BaseModel
 from src.models.config import AgentLLMConfig
@@ -17,7 +18,7 @@ class BaseAgent(ABC):
         self.logger = logging.getLogger(f"agent.{self.agent_type.value}")
 
     @abstractmethod
-    async def run(self, state) -> AgentMessage:
+    async def run(self, state: Any) -> AgentMessage:
         pass
 
     @abstractmethod
@@ -26,7 +27,7 @@ class BaseAgent(ABC):
 
     async def _call_llm_with_retry(
         self,
-        messages: list[dict],
+        messages: list[dict[str, Any]],
         system: str | None = None,
         schema: type[BaseModel] | None = None,
         max_retries: int | None = None,

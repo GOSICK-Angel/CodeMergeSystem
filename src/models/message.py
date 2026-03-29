@@ -1,5 +1,6 @@
 from datetime import datetime
 from enum import Enum
+from typing import Any
 from uuid import uuid4
 from pydantic import BaseModel, Field
 from src.models.plan import MergePhase
@@ -34,7 +35,7 @@ class AgentMessage(BaseModel):
     phase: MergePhase
     message_type: MessageType
     subject: str
-    payload: dict = Field(default_factory=dict)
+    payload: dict[str, Any] = Field(default_factory=dict)
     correlation_id: str | None = None
     priority: int = Field(default=5, ge=1, le=10)
     timestamp: datetime = Field(default_factory=datetime.now)

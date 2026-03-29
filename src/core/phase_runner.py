@@ -1,5 +1,5 @@
 import asyncio
-from typing import Callable, TypeVar, Awaitable
+from typing import Any, Callable, TypeVar, Awaitable
 
 T = TypeVar("T")
 
@@ -12,8 +12,8 @@ class PhaseRunner:
     async def run_sequential(
         self,
         items: list[T],
-        handler: Callable[[T], Awaitable],
-    ) -> list:
+        handler: Callable[[T], Awaitable[Any]],
+    ) -> list[Any]:
         results = []
         for item in items:
             result = await handler(item)
@@ -23,24 +23,24 @@ class PhaseRunner:
     async def run_parallel(
         self,
         items: list[T],
-        handler: Callable[[T], Awaitable],
-    ) -> list:
+        handler: Callable[[T], Awaitable[Any]],
+    ) -> list[Any]:
         semaphore = asyncio.Semaphore(self.max_concurrency)
 
-        async def bounded_handler(item: T):
+        async def bounded_handler(item: T) -> Any:
             async with semaphore:
                 return await handler(item)
 
         tasks = [bounded_handler(item) for item in items]
-        return await asyncio.gather(*tasks, return_exceptions=True)
+        return list(await asyncio.gather(*tasks, return_exceptions=True))
 
     async def run_batched(
         self,
         items: list[T],
-        handler: Callable[[T], Awaitable],
-        on_batch_complete: Callable[[list], Awaitable] | None = None,
+        handler: Callable[[T], Awaitable[Any]],
+        on_batch_complete: Callable[[list[Any]], Awaitable[Any]] | None = None,
         parallel: bool = True,
-    ) -> list:
+    ) -> list[Any]:
         all_results = []
 
         for i in range(0, len(items), self.batch_size):

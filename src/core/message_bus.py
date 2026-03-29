@@ -1,12 +1,15 @@
 import asyncio
 from collections import defaultdict
+from typing import Callable
 from src.models.message import AgentMessage, AgentType
 
 
 class MessageBus:
-    def __init__(self):
+    def __init__(self) -> None:
         self._messages: list[AgentMessage] = []
-        self._subscribers: dict[AgentType, list] = defaultdict(list)
+        self._subscribers: dict[AgentType, list[Callable[[AgentMessage], None]]] = (
+            defaultdict(list)
+        )
         self._queue: asyncio.Queue[AgentMessage] = asyncio.Queue()
 
     def publish(self, message: AgentMessage) -> None:
@@ -28,7 +31,9 @@ class MessageBus:
                         except Exception:
                             pass
 
-    def subscribe(self, agent_type: AgentType, callback) -> None:
+    def subscribe(
+        self, agent_type: AgentType, callback: Callable[[AgentMessage], None]
+    ) -> None:
         self._subscribers[agent_type].append(callback)
 
     def get_messages(

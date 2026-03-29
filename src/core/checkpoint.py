@@ -64,7 +64,7 @@ class Checkpoint:
         return checkpoints[-1] if checkpoints else None
 
     def register_signal_handler(self, state: MergeState) -> None:
-        def handler(signum, frame):
+        def handler(signum: int, frame: object) -> None:
             self.save(state, "interrupt")
             raise SystemExit(0)
 

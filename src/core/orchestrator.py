@@ -27,6 +27,8 @@ from src.tools.file_classifier import (
     is_security_sensitive,
 )
 from src.tools.report_writer import write_markdown_report, write_json_report
+from src.models.conflict import ConflictAnalysis
+from src.models.config import ThresholdConfig
 
 
 logger = logging.getLogger(__name__)
@@ -182,6 +184,7 @@ class Orchestrator:
         for round_num in range(self.config.max_plan_revision_rounds + 1):
             state.plan_revision_rounds = round_num
 
+            assert state.merge_plan is not None
             verdict = await self.planner_judge.review_plan(
                 state.merge_plan, file_diffs, round_num
             )
@@ -484,7 +487,9 @@ def _parse_file_status(status_char: str) -> FileStatus:
     return mapping.get(status_char.upper(), FileStatus.MODIFIED)
 
 
-def _select_merge_strategy(analysis, thresholds) -> MergeDecision:
+def _select_merge_strategy(
+    analysis: ConflictAnalysis, thresholds: ThresholdConfig
+) -> MergeDecision:
     from src.models.conflict import ConflictType
 
     if analysis.confidence < thresholds.human_escalation:
@@ -510,7 +515,9 @@ def _select_merge_strategy(analysis, thresholds) -> MergeDecision:
     return MergeDecision.ESCALATE_HUMAN
 
 
-def _build_human_decision_request(fd: FileDiff, analysis) -> HumanDecisionRequest:
+def _build_human_decision_request(
+    fd: FileDiff, analysis: ConflictAnalysis
+) -> HumanDecisionRequest:
     from datetime import datetime
 
     rec_val = analysis.recommended_strategy

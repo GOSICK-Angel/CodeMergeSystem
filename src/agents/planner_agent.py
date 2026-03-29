@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 from uuid import uuid4
 from src.agents.base_agent import BaseAgent
 from src.models.config import AgentLLMConfig, MergeConfig
@@ -70,7 +71,7 @@ class PlannerAgent(BaseAgent):
 
         return self._build_merge_plan(plan_data, state, all_file_diffs)
 
-    def _create_fallback_plan_data(self, file_diffs: list[FileDiff]) -> dict:
+    def _create_fallback_plan_data(self, file_diffs: list[FileDiff]) -> dict[str, Any]:
         phases = []
         auto_safe = []
         auto_risky = []
@@ -161,7 +162,7 @@ class PlannerAgent(BaseAgent):
         }
 
     def _build_merge_plan(
-        self, plan_data: dict, state: MergeState, file_diffs: list[FileDiff]
+        self, plan_data: dict[str, Any], state: MergeState, file_diffs: list[FileDiff]
     ) -> MergePlan:
         phases: list[PhaseFileBatch] = []
         for batch_data in plan_data.get("phases", []):
@@ -246,7 +247,7 @@ class PlannerAgent(BaseAgent):
 
     def _apply_judge_issues_to_plan(
         self, original_plan: MergePlan, judge_issues: list[PlanIssue]
-    ) -> dict:
+    ) -> dict[str, Any]:
         reclassify: dict[str, str] = {
             issue.file_path: issue.suggested_classification.value
             for issue in judge_issues
@@ -299,7 +300,7 @@ class PlannerAgent(BaseAgent):
     async def handle_dispute(
         self,
         state: MergeState,
-        dispute,
+        dispute: Any,
     ) -> MergePlan:
         from src.models.plan_judge import PlanIssue
         from src.models.diff import RiskLevel

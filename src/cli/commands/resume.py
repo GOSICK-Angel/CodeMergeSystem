@@ -2,7 +2,7 @@ import asyncio
 import sys
 from pathlib import Path
 from rich.console import Console
-from src.models.state import SystemStatus
+from src.models.state import MergeState, SystemStatus
 from src.core.checkpoint import Checkpoint
 from src.core.orchestrator import Orchestrator
 
@@ -43,7 +43,7 @@ def resume_command_impl(run_id: str | None, checkpoint_path: str | None) -> None
 
     orchestrator = Orchestrator(state.config)
 
-    async def execute():
+    async def execute() -> MergeState:
         return await orchestrator.run(state)
 
     final_state = asyncio.run(execute())

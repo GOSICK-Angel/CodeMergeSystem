@@ -89,9 +89,9 @@ def compute_risk_score(file_diff: FileDiff, config: FileClassifierConfig) -> flo
         return 0.1
 
     if matches_any_pattern(file_diff.file_path, config.security_sensitive.patterns):
-        return max(raw_score, 0.8)
+        return float(max(raw_score, 0.8))
 
-    return round(raw_score, 3)
+    return float(round(raw_score, 3))
 
 
 def is_security_sensitive(file_path: str, config: FileClassifierConfig) -> bool:

@@ -18,7 +18,7 @@ class PlannerJudgeAgent(BaseAgent):
     def __init__(self, llm_config: AgentLLMConfig):
         super().__init__(llm_config)
 
-    async def run(self, state) -> AgentMessage:
+    async def run(self, state: MergeState) -> AgentMessage:
         if state.merge_plan is None:
             raise ValueError("No merge plan to review")
 

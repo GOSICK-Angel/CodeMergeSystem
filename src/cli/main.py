@@ -13,14 +13,14 @@ console = Console()
 
 
 @click.group()
-def cli():
+def cli() -> None:
     pass
 
 
 @cli.command("run")
 @click.option("--config", "-c", required=True, type=click.Path(exists=True))
 @click.option("--dry-run", is_flag=True, help="Analyze only, do not merge")
-def run_command(config: str, dry_run: bool):
+def run_command(config: str, dry_run: bool) -> None:
     """Execute complete merge workflow"""
     from src.cli.commands.run import run_command_impl
 
@@ -32,7 +32,7 @@ def run_command(config: str, dry_run: bool):
 @click.option(
     "--checkpoint", required=False, type=click.Path(exists=True), default=None
 )
-def resume_command(run_id: str | None, checkpoint: str | None):
+def resume_command(run_id: str | None, checkpoint: str | None) -> None:
     """Resume execution from a checkpoint"""
     from src.cli.commands.resume import resume_command_impl
 
@@ -42,7 +42,7 @@ def resume_command(run_id: str | None, checkpoint: str | None):
 @cli.command("report")
 @click.option("--run-id", required=True)
 @click.option("--output", "-o", default="./outputs")
-def report_command(run_id: str, output: str):
+def report_command(run_id: str, output: str) -> None:
     """Generate reports only (without executing merge)"""
     checkpoint_manager = Checkpoint(output)
     latest = checkpoint_manager.get_latest(run_id)
@@ -67,7 +67,7 @@ def report_command(run_id: str, output: str):
 
 @cli.command("validate")
 @click.option("--config", "-c", required=True, type=click.Path(exists=True))
-def validate_command(config: str):
+def validate_command(config: str) -> None:
     """Validate config file and check required environment variables"""
     config_file = Path(config)
     try:

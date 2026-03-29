@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+from typing import Any
 from uuid import uuid4
 from src.llm.client import ParseError
 from src.models.plan_judge import PlanJudgeVerdict, PlanJudgeResult, PlanIssue
@@ -14,7 +15,7 @@ from src.models.judge import JudgeVerdict, JudgeIssue, VerdictType, IssueSeverit
 from src.models.diff import RiskLevel
 
 
-def _extract_json(raw: str | dict) -> dict:
+def _extract_json(raw: str | dict[str, Any]) -> dict[str, Any]:
     if isinstance(raw, dict):
         return raw
     text = raw.strip()
@@ -28,13 +29,13 @@ def _extract_json(raw: str | dict) -> dict:
                 break
         text = "\n".join(lines[start:end])
     try:
-        return json.loads(text)
+        return json.loads(text)  # type: ignore[no-any-return]
     except json.JSONDecodeError as e:
         start = text.find("{")
         end = text.rfind("}") + 1
         if start >= 0 and end > start:
             try:
-                return json.loads(text[start:end])
+                return json.loads(text[start:end])  # type: ignore[no-any-return]
             except json.JSONDecodeError:
                 pass
         raise ParseError(f"Cannot extract JSON from response: {e}\nRaw: {raw[:500]}")
@@ -48,7 +49,7 @@ def _validate_confidence(value: float) -> float:
     return float(value)
 
 
-def _validate_enum(value: str, enum_class: type, field_name: str) -> str:
+def _validate_enum(value: str, enum_class: Any, field_name: str) -> str:
     valid_values = {e.value for e in enum_class}
     if value not in valid_values:
         raise ParseError(
@@ -58,7 +59,7 @@ def _validate_enum(value: str, enum_class: type, field_name: str) -> str:
 
 
 def parse_plan_judge_verdict(
-    raw: str | dict, judge_model: str = "unknown", revision_round: int = 0
+    raw: str | dict[str, Any], judge_model: str = "unknown", revision_round: int = 0
 ) -> PlanJudgeVerdict:
     data = _extract_json(raw)
 
@@ -95,7 +96,7 @@ def parse_plan_judge_verdict(
 
 
 def parse_conflict_analysis(
-    raw: str | dict, file_path: str, model: str = "unknown"
+    raw: str | dict[str, Any], file_path: str, model: str = "unknown"
 ) -> ConflictAnalysis:
     data = _extract_json(raw)
 
@@ -155,7 +156,7 @@ def parse_conflict_analysis(
 
 
 def parse_judge_verdict(
-    raw: str | dict,
+    raw: str | dict[str, Any],
     reviewed_files: list[str],
     judge_model: str = "unknown",
     all_issues: list[JudgeIssue] | None = None,
@@ -213,7 +214,7 @@ def parse_judge_verdict(
     )
 
 
-def parse_merge_result(raw: str | dict) -> str:
+def parse_merge_result(raw: str | dict[str, Any]) -> str:
     if isinstance(raw, dict):
         return str(raw.get("content", ""))
     text = raw.strip()
@@ -230,7 +231,7 @@ def parse_merge_result(raw: str | dict) -> str:
 
 
 def parse_file_review_issues(
-    raw: str | dict, default_file_path: str
+    raw: str | dict[str, Any], default_file_path: str
 ) -> list[JudgeIssue]:
     data = _extract_json(raw)
     issues: list[JudgeIssue] = []

@@ -9,11 +9,12 @@ class GitTool:
             self.repo = Repo(repo_path, search_parent_directories=True)
         except InvalidGitRepositoryError as e:
             raise ValueError(f"Not a valid git repository: {repo_path}") from e
+        assert self.repo.working_tree_dir is not None
         self.repo_path = Path(self.repo.working_tree_dir)
 
     def get_merge_base(self, upstream_ref: str, fork_ref: str) -> str:
         result = self.repo.git.merge_base(upstream_ref, fork_ref)
-        return result.strip()
+        return str(result).strip()
 
     def get_changed_files(self, base: str, head: str) -> list[tuple[str, str]]:
         diff_output = self.repo.git.diff("--name-status", base, head)
@@ -33,7 +34,7 @@ class GitTool:
 
     def get_file_content(self, ref: str, file_path: str) -> str | None:
         try:
-            return self.repo.git.show(f"{ref}:{file_path}")
+            return str(self.repo.git.show(f"{ref}:{file_path}"))
         except git.GitCommandError:
             return None
 
@@ -76,7 +77,7 @@ class GitTool:
 
     def get_unified_diff(self, base: str, head: str, file_path: str) -> str:
         try:
-            return self.repo.git.diff(base, head, "--", file_path)
+            return str(self.repo.git.diff(base, head, "--", file_path))
         except git.GitCommandError:
             return ""
 

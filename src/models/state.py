@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 from pydantic import BaseModel, Field
 from src.models.config import MergeConfig
@@ -64,8 +64,8 @@ class MergeState(BaseModel):
 
     judge_verdict: JudgeVerdict | None = None
 
-    errors: list[dict] = Field(default_factory=list)
-    messages: list[dict] = Field(default_factory=list)
+    errors: list[dict[str, Any]] = Field(default_factory=list)
+    messages: list[dict[str, Any]] = Field(default_factory=list)
 
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)

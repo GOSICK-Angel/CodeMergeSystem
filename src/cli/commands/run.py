@@ -34,7 +34,7 @@ def run_command_impl(config_path: str, dry_run: bool) -> None:
 
     orchestrator = Orchestrator(config)
 
-    async def execute():
+    async def execute() -> MergeState:
         return await orchestrator.run(state)
 
     final_state = asyncio.run(execute())

@@ -30,6 +30,7 @@ dev = [
     "pytest-cov>=4.1",
     "mypy>=1.8",
     "ruff>=0.3",
+    "types-PyYAML>=6.0",
 ]
 
 [tool.pytest.ini_options]
@@ -42,3 +43,5 @@ packages = ["src"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+mypy_path = "."
+explicit_package_bases = true

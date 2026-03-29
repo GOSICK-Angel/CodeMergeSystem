@@ -7,6 +7,7 @@ from src.models.diff import FileDiff, RiskLevel
 from src.models.decision import FileDecisionRecord
 from src.models.judge import JudgeVerdict, JudgeIssue, VerdictType, IssueSeverity
 from src.models.state import MergeState
+from src.core.read_only_state_view import ReadOnlyStateView
 from src.llm.prompts.judge_prompts import (
     JUDGE_SYSTEM,
     build_file_review_prompt,
@@ -23,7 +24,7 @@ class JudgeAgent(BaseAgent):
         super().__init__(llm_config)
         self.git_tool = git_tool
 
-    async def run(self, state) -> AgentMessage:
+    async def run(self, state: ReadOnlyStateView) -> AgentMessage:
         all_issues: list[JudgeIssue] = []
         reviewed_files: list[str] = []
 
