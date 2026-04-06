@@ -228,6 +228,25 @@ class PlannerAgent(BaseAgent):
             cat_summary.d_missing,
         )
 
+        special_instructions: list[str] = []
+
+        if state.pollution_audit and state.pollution_audit.has_pollution:
+            pa = state.pollution_audit
+            special_instructions.append(
+                f"Pollution audit: {pa.reclassified_count} files reclassified "
+                f"from {len(pa.prior_merge_commits)} prior merge commits. "
+                f"Classifications have been corrected automatically."
+            )
+
+        if state.config_drifts and state.config_drifts.has_drifts:
+            cd = state.config_drifts
+            drift_keys = [d.key for d in cd.drifts]
+            special_instructions.append(
+                f"Config drift detected: {cd.drift_count} keys with divergent defaults "
+                f"across sources: {', '.join(drift_keys[:10])}. "
+                f"Review config files in Layer 1 (dependencies) carefully."
+            )
+
         return MergePlan(
             created_at=datetime.now(),
             upstream_ref=state.config.upstream_ref,
@@ -238,7 +257,7 @@ class PlannerAgent(BaseAgent):
             category_summary=cat_summary,
             layers=layers,
             project_context_summary=state.config.project_context or "",
-            special_instructions=[],
+            special_instructions=special_instructions,
         )
 
     def _resolve_layers(self, config: MergeConfig) -> list[MergeLayer]:

@@ -1,10 +1,15 @@
+from __future__ import annotations
+
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 from pydantic import BaseModel, Field
 from src.models.diff import RiskLevel, FileChangeCategory
 from src.models.config import GateCommandConfig
+
+if TYPE_CHECKING:
+    from src.tools.config_drift_detector import ConfigDrift
 
 
 class MergePhase(str, Enum):
@@ -274,3 +279,20 @@ class MergePlanLive(MergePlan):
     open_issues: list[OpenIssue] = Field(default_factory=list)
     todo_merge_count: int = 0
     todo_merge_limit: int = 30
+    config_drifts: list[ConfigDrift] = Field(
+        default_factory=list,
+        description="Configuration drift entries detected during planning",
+    )
+    pollution_summary: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Summary of pollution audit results from Phase 0",
+    )
+
+
+def _rebuild_plan_models() -> None:
+    from src.tools.config_drift_detector import ConfigDrift
+
+    MergePlanLive.model_rebuild(_types_namespace={"ConfigDrift": ConfigDrift})
+
+
+_rebuild_plan_models()

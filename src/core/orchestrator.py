@@ -43,6 +43,8 @@ from src.models.conflict import ConflictAnalysis
 from src.models.config import ThresholdConfig
 from src.models.judge import VerdictType
 from src.tools.gate_runner import GateRunner
+from src.tools.pollution_auditor import PollutionAuditor
+from src.tools.config_drift_detector import ConfigDriftDetector
 
 
 logger = logging.getLogger(__name__)
@@ -251,6 +253,25 @@ class Orchestrator:
             state.config.upstream_ref,
             self.git_tool,
         )
+
+        auditor = PollutionAuditor(self.git_tool)
+        pollution_report = auditor.audit(
+            merge_base,
+            state.config.fork_ref,
+            state.config.upstream_ref,
+            file_categories,
+        )
+        state.pollution_audit = pollution_report
+        if pollution_report.has_pollution:
+            logger.info(
+                "Pollution audit: %d files reclassified from %d prior merge commits",
+                pollution_report.reclassified_count,
+                len(pollution_report.prior_merge_commits),
+            )
+            file_categories = auditor.apply_corrections(
+                file_categories, pollution_report
+            )
+
         state.file_categories = file_categories
 
         cat_counts = category_summary(file_categories)
@@ -310,6 +331,22 @@ class Orchestrator:
             file_diffs.append(fd)
 
         object.__setattr__(state, "_file_diffs", file_diffs)
+
+        drift_detector = ConfigDriftDetector(Path(state.config.repo_path).resolve())
+        env_files, docker_env_files = drift_detector.find_env_files()
+        if env_files or docker_env_files:
+            drift_report = drift_detector.detect_drift_from_files(
+                env_files=env_files,
+                docker_env_files=docker_env_files,
+            )
+            state.config_drifts = drift_report
+            if drift_report.has_drifts:
+                logger.info(
+                    "Config drift detection: %d drifts found across %d keys",
+                    drift_report.drift_count,
+                    drift_report.total_keys_checked,
+                )
+
         self.state_machine.transition(
             state, SystemStatus.PLANNING, "initialization complete"
         )

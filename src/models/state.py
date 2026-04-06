@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 from pydantic import BaseModel, Field
 from src.models.config import MergeConfig
@@ -13,6 +15,10 @@ from src.models.plan_judge import PlanJudgeVerdict
 from src.models.plan_review import PlanReviewRound, PlanHumanReview
 from src.models.dispute import PlanDisputeRequest
 from src.models.conflict import ConflictAnalysis
+
+if TYPE_CHECKING:
+    from src.tools.config_drift_detector import ConfigDriftReport
+    from src.tools.pollution_auditor import PollutionAuditReport
 
 
 class SystemStatus(str, Enum):
@@ -78,6 +84,15 @@ class MergeState(BaseModel):
     gate_history: list[dict[str, Any]] = Field(default_factory=list)
     consecutive_gate_failures: int = 0
 
+    pollution_audit: PollutionAuditReport | None = Field(
+        default=None,
+        description="PollutionAuditReport from Phase 0 pre-check",
+    )
+    config_drifts: ConfigDriftReport | None = Field(
+        default=None,
+        description="ConfigDriftReport from drift detection",
+    )
+
     errors: list[dict[str, Any]] = Field(default_factory=list)
     messages: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -86,3 +101,18 @@ class MergeState(BaseModel):
     checkpoint_path: str | None = None
 
     model_config = {"use_enum_values": False}
+
+
+def _rebuild_state_model() -> None:
+    from src.tools.config_drift_detector import ConfigDriftReport
+    from src.tools.pollution_auditor import PollutionAuditReport
+
+    MergeState.model_rebuild(
+        _types_namespace={
+            "ConfigDriftReport": ConfigDriftReport,
+            "PollutionAuditReport": PollutionAuditReport,
+        }
+    )
+
+
+_rebuild_state_model()
