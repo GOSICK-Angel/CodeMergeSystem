@@ -1,3 +1,5 @@
+import fnmatch
+import re
 from datetime import datetime
 from src.agents.base_agent import BaseAgent
 from src.models.config import AgentLLMConfig
@@ -14,6 +16,7 @@ from src.models.judge import (
     IssueSeverity,
 )
 from src.models.config import CustomizationEntry, CustomizationVerification
+from src.models.diff import FileChangeCategory
 from src.models.state import MergeState
 from src.core.read_only_state_view import ReadOnlyStateView
 from src.llm.prompts.judge_prompts import (
@@ -23,6 +26,7 @@ from src.llm.prompts.judge_prompts import (
 )
 from src.llm.response_parser import parse_file_review_issues, parse_judge_verdict
 from src.tools.git_tool import GitTool
+from src.tools.three_way_diff import ThreeWayDiff
 from src.tools.syntax_checker import check_syntax as check_file_syntax
 
 
@@ -42,8 +46,17 @@ class JudgeAgent(BaseAgent):
             for fd in state._file_diffs or []:
                 file_diffs_map[fd.file_path] = fd
 
+        deterministic_issues = self._run_deterministic_pipeline(state, file_diffs_map)
+        all_issues.extend(deterministic_issues)
+
+        deterministic_veto_files = {
+            i.file_path for i in deterministic_issues if i.veto_condition
+        }
+
         high_risk_records: dict[str, FileDecisionRecord] = {}
         for fp, record in state.file_decision_records.items():
+            if fp in deterministic_veto_files:
+                continue
             fd = file_diffs_map.get(fp)
             if fd and fd.risk_level in (RiskLevel.HUMAN_REQUIRED, RiskLevel.AUTO_RISKY):
                 high_risk_records[fp] = record
@@ -66,13 +79,12 @@ class JudgeAgent(BaseAgent):
                 merged_content,
                 record,
                 fd,
-                project_context=state.config.project_context
-                if hasattr(state, "config")
-                else "",
+                project_context=state.config.project_context,
             )
             all_issues.extend(issues)
             reviewed_files.append(file_path)
 
+        reviewed_files.extend(deterministic_veto_files)
         verdict = await self._compute_final_verdict(reviewed_files, all_issues)
 
         return AgentMessage(
@@ -142,6 +154,151 @@ class JudgeAgent(BaseAgent):
                 break
 
         return issues
+
+    def _run_deterministic_pipeline(
+        self,
+        state: ReadOnlyStateView,
+        file_diffs_map: dict[str, FileDiff],
+    ) -> list[JudgeIssue]:
+        if self.git_tool is None:
+            return []
+
+        issues: list[JudgeIssue] = []
+        three_way = ThreeWayDiff(self.git_tool)
+
+        categories: dict[str, FileChangeCategory] = state.file_categories or {}
+
+        merge_base = state.merge_base_commit or ""
+        upstream_ref = state.config.upstream_ref
+
+        if not merge_base or not upstream_ref:
+            return []
+
+        todo_merge_total = 0
+
+        for fp, cat in categories.items():
+            if cat == FileChangeCategory.B:
+                if not three_way.verify_b_class(fp, upstream_ref):
+                    issues.append(
+                        JudgeIssue(
+                            file_path=fp,
+                            issue_level=IssueSeverity.CRITICAL,
+                            issue_type="b_class_mismatch",
+                            description=(
+                                "B-class file differs from upstream after merge"
+                            ),
+                            must_fix_before_merge=True,
+                            veto_condition="B-class file differs from upstream",
+                        )
+                    )
+
+            elif cat == FileChangeCategory.D_MISSING:
+                if not three_way.verify_d_missing_present(fp):
+                    issues.append(
+                        JudgeIssue(
+                            file_path=fp,
+                            issue_level=IssueSeverity.CRITICAL,
+                            issue_type="d_missing_absent",
+                            description="D-missing file not present in HEAD after merge",
+                            must_fix_before_merge=True,
+                            veto_condition="D-missing file not present in HEAD",
+                        )
+                    )
+
+            elif cat == FileChangeCategory.C:
+                additions = three_way.extract_upstream_additions(
+                    fp, merge_base, upstream_ref
+                )
+                if additions:
+                    missing = three_way.verify_additions_present(fp, additions)
+                    if missing:
+                        issues.append(
+                            JudgeIssue(
+                                file_path=fp,
+                                issue_level=IssueSeverity.HIGH,
+                                issue_type="missing_upstream_addition",
+                                description=(
+                                    f"Upstream additions missing in merged: "
+                                    f"{', '.join(missing[:5])}"
+                                    f"{'...' if len(missing) > 5 else ''}"
+                                ),
+                                must_fix_before_merge=True,
+                                veto_condition=(
+                                    "Upstream function block missing in merged"
+                                    if any(
+                                        self._is_large_addition(
+                                            fp, name, merge_base, upstream_ref
+                                        )
+                                        for name in missing
+                                    )
+                                    else None
+                                ),
+                            )
+                        )
+
+            todo_check_lines = three_way.find_todo_check(fp)
+            if todo_check_lines:
+                issues.append(
+                    JudgeIssue(
+                        file_path=fp,
+                        issue_level=IssueSeverity.CRITICAL,
+                        issue_type="prohibited_todo_check",
+                        description=(
+                            f"Unannotated TODO [check] at lines: "
+                            f"{todo_check_lines[:10]}"
+                        ),
+                        affected_lines=todo_check_lines[:10],
+                        must_fix_before_merge=True,
+                        veto_condition="Unannotated TODO [check] exists",
+                    )
+                )
+
+            todo_merge_total += three_way.count_todo_merge(fp)
+
+        if todo_merge_total > 30:
+            issues.append(
+                JudgeIssue(
+                    file_path="(global)",
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="todo_merge_exceeded",
+                    description=(
+                        f"TODO [merge] count ({todo_merge_total}) "
+                        f"exceeds phase limit (30)"
+                    ),
+                    must_fix_before_merge=True,
+                    veto_condition="TODO [merge] count exceeds phase limit",
+                )
+            )
+
+        return issues
+
+    def _is_large_addition(
+        self,
+        file_path: str,
+        symbol_name: str,
+        merge_base: str,
+        upstream_ref: str,
+    ) -> bool:
+        if self.git_tool is None:
+            return False
+        base_content = self.git_tool.get_file_content(merge_base, file_path) or ""
+        upstream_content = self.git_tool.get_file_content(upstream_ref, file_path) or ""
+
+        if symbol_name in base_content:
+            return False
+
+        pattern = re.compile(
+            rf"(?:def|class|function)\s+{re.escape(symbol_name)}\b",
+            re.MULTILINE,
+        )
+        match = pattern.search(upstream_content)
+        if not match:
+            return False
+
+        start = match.start()
+        remaining = upstream_content[start:]
+        lines = remaining.split("\n")
+        return len(lines) > 20
 
     def compute_verdict(self, all_issues: list[JudgeIssue]) -> VerdictType:
         has_critical = any(i.issue_level == IssueSeverity.CRITICAL for i in all_issues)
@@ -238,16 +395,14 @@ class JudgeAgent(BaseAgent):
         checked = list(results.keys()) if results else []
 
         if not checked and verif.files:
-            import fnmatch
-
             all_files = [
                 str(p.relative_to(self.git_tool.repo_path))
                 for p in self.git_tool.repo_path.rglob("*")
                 if p.is_file()
             ]
-            for pattern in verif.files:
+            for pat in verif.files:
                 for fp in all_files:
-                    if fnmatch.fnmatch(fp, pattern):
+                    if fnmatch.fnmatch(fp, pat):
                         checked.append(fp)
 
         if total_matches == 0:
@@ -294,16 +449,14 @@ class JudgeAgent(BaseAgent):
 
         checked: list[str] = []
         if verif.files:
-            import fnmatch
-
             all_files = [
                 str(p.relative_to(self.git_tool.repo_path))
                 for p in self.git_tool.repo_path.rglob("*")
                 if p.is_file()
             ]
-            for pattern in verif.files:
+            for pat in verif.files:
                 for fp in all_files:
-                    if fnmatch.fnmatch(fp, pattern):
+                    if fnmatch.fnmatch(fp, pat):
                         checked.append(fp)
 
         if total_matches == 0:

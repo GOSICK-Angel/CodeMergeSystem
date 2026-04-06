@@ -30,6 +30,7 @@ class JudgeIssue(BaseModel):
     affected_lines: list[int] = Field(default_factory=list)
     suggested_fix: str | None = None
     must_fix_before_merge: bool = False
+    veto_condition: str | None = None
 
 
 class RepairInstruction(BaseModel):

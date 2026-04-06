@@ -229,3 +229,48 @@ class MergePlan(BaseModel):
     project_context_summary: str
     special_instructions: list[str] = Field(default_factory=list)
     version: str = "2.0"
+
+
+class PhaseExecutionRecord(BaseModel):
+    phase_id: str
+    started_at: datetime
+    completed_at: datetime | None = None
+    files_processed: int = 0
+    files_skipped: int = 0
+    commit_hash: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class PhaseJudgeRecord(BaseModel):
+    phase_id: str
+    round_number: int
+    verdict: str
+    reviewed_at: datetime = Field(default_factory=datetime.now)
+    issues: list[dict[str, str]] = Field(default_factory=list)
+    veto_triggered: bool = False
+    repair_instructions: list[str] = Field(default_factory=list)
+
+
+class PhaseGateRecord(BaseModel):
+    phase_id: str
+    gate_results: list[dict[str, Any]] = Field(default_factory=list)
+    all_passed: bool
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+
+class OpenIssue(BaseModel):
+    issue_id: str = Field(default_factory=lambda: str(uuid4()))
+    phase_id: str
+    description: str
+    severity: str
+    assigned_to_phase: str | None = None
+    resolved: bool = False
+
+
+class MergePlanLive(MergePlan):
+    execution_records: list[PhaseExecutionRecord] = Field(default_factory=list)
+    judge_records: list[PhaseJudgeRecord] = Field(default_factory=list)
+    gate_records: list[PhaseGateRecord] = Field(default_factory=list)
+    open_issues: list[OpenIssue] = Field(default_factory=list)
+    todo_merge_count: int = 0
+    todo_merge_limit: int = 30

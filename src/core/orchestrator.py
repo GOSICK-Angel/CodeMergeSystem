@@ -35,6 +35,7 @@ from src.tools.report_writer import (
     write_markdown_report,
     write_json_report,
     write_plan_review_report,
+    write_living_plan_report,
 )
 from src.tools.trace_logger import TraceLogger
 from src.models.plan_review import PlanReviewRound, PlanHumanDecision
@@ -524,6 +525,8 @@ class Orchestrator:
         )
         state.phase_results[MergePhase.AUTO_MERGE.value] = phase_result
 
+        self._append_execution_record(state, "auto_merge", phase_result, batch_count)
+
         if state.plan_disputes:
             self.state_machine.transition(
                 state, SystemStatus.PLAN_DISPUTE_PENDING, "executor raised plan dispute"
@@ -648,6 +651,8 @@ class Orchestrator:
                 }
             )
 
+            self._append_judge_record(state, round_num)
+
             if state.judge_verdict is None:
                 break
 
@@ -753,14 +758,14 @@ class Orchestrator:
             state.gate_baselines or None,
         )
 
-        state.gate_history.append(
-            {
-                "phase": phase_name,
-                "timestamp": datetime.now().isoformat(),
-                "all_passed": report.all_passed,
-                "results": [r.model_dump(mode="json") for r in report.results],
-            }
-        )
+        gate_entry = {
+            "phase": phase_name,
+            "timestamp": datetime.now().isoformat(),
+            "all_passed": report.all_passed,
+            "results": [r.model_dump(mode="json") for r in report.results],
+        }
+        state.gate_history.append(gate_entry)
+        self._append_gate_record(state, phase_name, gate_entry)
 
         if report.all_passed:
             state.consecutive_gate_failures = 0
@@ -830,6 +835,74 @@ class Orchestrator:
             return None
         return list(layer.gate_commands)
 
+    def _append_execution_record(
+        self,
+        state: MergeState,
+        phase_id: str,
+        phase_result: PhaseResult,
+        files_processed: int,
+    ) -> None:
+        from src.models.plan import MergePlanLive, PhaseExecutionRecord
+
+        if not isinstance(state.merge_plan, MergePlanLive):
+            return
+
+        state.merge_plan.execution_records.append(
+            PhaseExecutionRecord(
+                phase_id=phase_id,
+                started_at=phase_result.started_at or datetime.now(),
+                completed_at=phase_result.completed_at,
+                files_processed=files_processed,
+            )
+        )
+
+    def _append_judge_record(self, state: MergeState, round_number: int) -> None:
+        from src.models.plan import MergePlanLive, PhaseJudgeRecord
+
+        if not isinstance(state.merge_plan, MergePlanLive):
+            return
+
+        verdict = state.judge_verdict
+        if verdict is None:
+            return
+
+        state.merge_plan.judge_records.append(
+            PhaseJudgeRecord(
+                phase_id="judge_review",
+                round_number=round_number,
+                verdict=verdict.verdict.value
+                if hasattr(verdict.verdict, "value")
+                else str(verdict.verdict),
+                issues=[
+                    {"file": i.file_path, "type": i.issue_type}
+                    for i in verdict.issues[:20]
+                ],
+                veto_triggered=verdict.veto_triggered,
+                repair_instructions=[
+                    r.instruction for r in verdict.repair_instructions[:10]
+                ],
+            )
+        )
+
+    def _append_gate_record(
+        self, state: MergeState, phase_id: str, gate_history_entry: dict[str, object]
+    ) -> None:
+        from src.models.plan import MergePlanLive, PhaseGateRecord
+
+        if not isinstance(state.merge_plan, MergePlanLive):
+            return
+
+        results_raw = gate_history_entry.get("results", [])
+        results = list(results_raw) if isinstance(results_raw, list) else []
+
+        state.merge_plan.gate_records.append(
+            PhaseGateRecord(
+                phase_id=phase_id,
+                gate_results=results,
+                all_passed=bool(gate_history_entry.get("all_passed", False)),
+            )
+        )
+
     async def _run_phase6(self, state: MergeState) -> None:
         state.current_phase = MergePhase.REPORT
         phase_result = PhaseResult(
@@ -846,6 +919,8 @@ class Orchestrator:
                 write_json_report(state, output_dir)
             if "markdown" in state.config.output.formats:
                 write_markdown_report(state, output_dir)
+
+            write_living_plan_report(state, output_dir)
 
             phase_result = phase_result.model_copy(
                 update={"status": "completed", "completed_at": datetime.now()}
