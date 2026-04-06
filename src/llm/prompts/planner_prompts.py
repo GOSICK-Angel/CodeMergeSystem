@@ -3,14 +3,29 @@ from src.models.plan import MergePlan
 from src.models.plan_judge import PlanIssue
 
 
-PLANNER_SYSTEM = """You are a code merge planning expert. Your task is to analyze differences between two branches,
+PLANNER_SYSTEM_TEMPLATE = """You are a code merge planning expert. Your task is to analyze differences between two branches,
 classify all changed files into different risk levels, and generate a phased merge plan.
 Focus on: complete coverage of all files, reasonable risk estimation, identifying critical dependencies.
-Output structured JSON. Risk levels: auto_safe, auto_risky, human_required, deleted_only, binary, excluded."""
+Output structured JSON. Risk levels: auto_safe, auto_risky, human_required, deleted_only, binary, excluded.
+{lang_instruction}"""
+
+
+def get_planner_system(language: str = "en") -> str:
+    if language == "en":
+        return PLANNER_SYSTEM_TEMPLATE.format(lang_instruction="")
+    return PLANNER_SYSTEM_TEMPLATE.format(
+        lang_instruction=f"\nIMPORTANT: All text fields (project_context_summary, special_instructions, summaries, reasons) MUST be written in {language}. JSON keys remain in English."
+    )
+
+
+PLANNER_SYSTEM = get_planner_system("en")
 
 
 def build_classification_prompt(
-    file_diffs: list[FileDiff], project_context: str
+    file_diffs: list[FileDiff],
+    project_context: str,
+    batch_index: int = 0,
+    total_batches: int = 1,
 ) -> str:
     file_list_lines: list[str] = []
     for fd in file_diffs:
@@ -22,11 +37,15 @@ def build_classification_prompt(
 
     file_list = "\n".join(file_list_lines)
 
+    batch_hint = ""
+    if total_batches > 1:
+        batch_hint = f"\nNote: This is batch {batch_index + 1} of {total_batches}. Classify only the files listed below.\n"
+
     return f"""Analyze the following changed files and create a merge plan.
 
 Project context:
 {project_context or "No project context provided."}
-
+{batch_hint}
 Changed files ({len(file_diffs)} total):
 {file_list}
 

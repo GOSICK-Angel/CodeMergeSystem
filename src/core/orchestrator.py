@@ -1,8 +1,10 @@
 import logging
+import time
 from datetime import datetime
+from pathlib import Path
 from src.models.config import MergeConfig
 from src.models.state import MergeState, SystemStatus, PhaseResult
-from src.models.plan import MergePhase
+from src.models.plan import MergePhase, MergeLayer
 from src.models.diff import FileDiff, RiskLevel, FileStatus
 from src.models.decision import MergeDecision
 from src.models.dispute import PlanDisputeRequest
@@ -24,11 +26,22 @@ from src.tools.diff_parser import build_file_diff, detect_language
 from src.tools.file_classifier import (
     compute_risk_score,
     classify_file,
+    classify_all_files,
+    category_summary,
     is_security_sensitive,
 )
-from src.tools.report_writer import write_markdown_report, write_json_report
+from src.models.diff import FileChangeCategory
+from src.tools.report_writer import (
+    write_markdown_report,
+    write_json_report,
+    write_plan_review_report,
+)
+from src.tools.trace_logger import TraceLogger
+from src.models.plan_review import PlanReviewRound, PlanHumanDecision
 from src.models.conflict import ConflictAnalysis
 from src.models.config import ThresholdConfig
+from src.models.judge import VerdictType
+from src.tools.gate_runner import GateRunner
 
 
 logger = logging.getLogger(__name__)
@@ -49,48 +62,153 @@ class Orchestrator:
         self.human_interface = HumanInterfaceAgent(config.agents.human_interface)
 
         self.git_tool = git_tool
+        self.gate_runner = GateRunner(Path(config.repo_path).resolve())
         self.state_machine = StateMachine()
         self.message_bus = MessageBus()
-        self.checkpoint = Checkpoint(config.output.directory)
+        self.checkpoint = Checkpoint(config.output.debug_directory)
         self.phase_runner = PhaseRunner(batch_size=10, max_concurrency=5)
+        self._log_handler: logging.FileHandler | None = None
+        self._trace_logger: TraceLogger | None = None
+
+        self._all_agents = [
+            self.planner,
+            self.planner_judge,
+            self.conflict_analyst,
+            self.executor,
+            self.judge,
+            self.human_interface,
+        ]
+
+    def _setup_run_logger(self, run_id: str) -> Path:
+        debug_dir = Path(self.config.output.debug_directory)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        log_path = debug_dir / f"run_{run_id}.log"
+
+        formatter = logging.Formatter(
+            "%(asctime)s [%(name)s] %(levelname)s %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        handler = logging.FileHandler(log_path, encoding="utf-8")
+        handler.setFormatter(formatter)
+        handler.setLevel(logging.DEBUG)
+
+        root = logging.getLogger()
+        root.addHandler(handler)
+        root.setLevel(logging.DEBUG)
+
+        for noisy in ("httpx", "httpcore", "anthropic", "openai", "git.cmd"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+
+        self._log_handler = handler
+
+        if self.config.output.include_llm_traces:
+            self._trace_logger = TraceLogger(str(debug_dir), run_id)
+            for agent in self._all_agents:
+                agent.set_trace_logger(self._trace_logger)
+
+        return log_path
+
+    def _teardown_run_logger(self) -> None:
+        if self._log_handler:
+            logging.getLogger().removeHandler(self._log_handler)
+            self._log_handler.close()
+            self._log_handler = None
 
     async def run(self, state: MergeState) -> MergeState:
+        log_path = self._setup_run_logger(state.run_id)
+        logger.info("=== Merge run %s started ===", state.run_id)
+        logger.info(
+            "Config: upstream=%s, fork=%s, max_files_per_run=%d, language=%s",
+            self.config.upstream_ref,
+            self.config.fork_ref,
+            self.config.max_files_per_run,
+            self.config.output.language,
+        )
+        run_start = time.monotonic()
         self.checkpoint.register_signal_handler(state)
 
         try:
             if state.status == SystemStatus.INITIALIZED:
+                t0 = time.monotonic()
                 await self._initialize(state)
+                logger.info(
+                    "Phase INITIALIZE completed in %.1fs — %d files collected",
+                    time.monotonic() - t0,
+                    len(getattr(state, "_file_diffs", []) or []),
+                )
 
             if state.status == SystemStatus.PLANNING:
+                t0 = time.monotonic()
                 await self._run_phase1(state)
                 self.checkpoint.save(state, "after_phase1")
+                logger.info("Phase PLANNING completed in %.1fs", time.monotonic() - t0)
 
             if state.status == SystemStatus.PLAN_REVIEWING:
+                t0 = time.monotonic()
                 await self._run_phase1_5(state)
                 self.checkpoint.save(state, "after_phase1_5")
+                logger.info(
+                    "Phase PLAN_REVIEW completed in %.1fs", time.monotonic() - t0
+                )
 
             if state.status == SystemStatus.AUTO_MERGING:
+                t0 = time.monotonic()
                 await self._run_phase2(state)
                 self.checkpoint.save(state, "after_phase2")
+                logger.info(
+                    "Phase AUTO_MERGE completed in %.1fs", time.monotonic() - t0
+                )
 
             if state.status == SystemStatus.ANALYZING_CONFLICTS:
+                t0 = time.monotonic()
                 await self._run_phase3(state)
                 self.checkpoint.save(state, "after_phase3")
+                logger.info(
+                    "Phase CONFLICT_ANALYSIS completed in %.1fs",
+                    time.monotonic() - t0,
+                )
 
             if state.status == SystemStatus.AWAITING_HUMAN:
-                self.checkpoint.save(state, "awaiting_human")
-                return state
+                logger.info("Entering AWAITING_HUMAN status")
+                if state.plan_human_review is not None:
+                    write_plan_review_report(state, self.config.output.directory)
+                    if state.plan_human_review.decision == PlanHumanDecision.APPROVE:
+                        self.state_machine.transition(
+                            state,
+                            SystemStatus.AUTO_MERGING,
+                            "plan approved by human reviewer",
+                        )
+                    elif state.plan_human_review.decision == PlanHumanDecision.REJECT:
+                        self.state_machine.transition(
+                            state,
+                            SystemStatus.FAILED,
+                            "plan rejected by human reviewer",
+                        )
+                    else:
+                        self.checkpoint.save(state, "awaiting_human")
+                        self._finalize_log(state, run_start)
+                        return state
+                else:
+                    self.checkpoint.save(state, "awaiting_human")
+                    self._finalize_log(state, run_start)
+                    return state
 
             if state.status == SystemStatus.JUDGE_REVIEWING:
+                t0 = time.monotonic()
                 await self._run_phase5(state)
                 self.checkpoint.save(state, "after_phase5")
+                logger.info(
+                    "Phase JUDGE_REVIEW completed in %.1fs", time.monotonic() - t0
+                )
 
             if state.status == SystemStatus.GENERATING_REPORT:
+                t0 = time.monotonic()
                 await self._run_phase6(state)
                 self.checkpoint.save(state, "completed")
+                logger.info("Phase REPORT completed in %.1fs", time.monotonic() - t0)
 
         except Exception as e:
-            logger.error(f"Orchestration failed: {e}", exc_info=True)
+            logger.error("Orchestration failed: %s", e, exc_info=True)
             state.errors.append(
                 {
                     "timestamp": datetime.now().isoformat(),
@@ -106,32 +224,82 @@ class Orchestrator:
                 pass
             self.checkpoint.save(state, "failed")
 
+        self._finalize_log(state, run_start)
         return state
+
+    def _finalize_log(self, state: MergeState, run_start: float) -> None:
+        elapsed = time.monotonic() - run_start
+        logger.info(
+            "=== Merge run %s finished — status=%s, elapsed=%.1fs ===",
+            state.run_id,
+            state.status.value if hasattr(state.status, "value") else state.status,
+            elapsed,
+        )
+        self._teardown_run_logger()
 
     async def _initialize(self, state: MergeState) -> None:
         merge_base = self.git_tool.get_merge_base(
             state.config.upstream_ref, state.config.fork_ref
         )
         object.__setattr__(state, "_merge_base", merge_base)
+        state.merge_base_commit = merge_base
+
+        file_categories = classify_all_files(
+            merge_base,
+            state.config.fork_ref,
+            state.config.upstream_ref,
+            self.git_tool,
+        )
+        state.file_categories = file_categories
+
+        cat_counts = category_summary(file_categories)
+        logger.info(
+            "Three-way classification: A=%d B=%d C=%d D-missing=%d D-extra=%d E=%d",
+            cat_counts.get("unchanged", 0),
+            cat_counts.get("upstream_only", 0),
+            cat_counts.get("both_changed", 0),
+            cat_counts.get("upstream_new", 0),
+            cat_counts.get("current_only", 0),
+            cat_counts.get("current_only_change", 0),
+        )
+
+        actionable_categories = {
+            FileChangeCategory.B,
+            FileChangeCategory.C,
+            FileChangeCategory.D_MISSING,
+        }
+        actionable_paths = {
+            fp for fp, cat in file_categories.items() if cat in actionable_categories
+        }
 
         changed_files = self.git_tool.get_changed_files(
             merge_base, state.config.fork_ref
         )
         file_diffs: list[FileDiff] = []
 
-        for status_char, file_path in changed_files:
-            raw_diff = self.git_tool.get_unified_diff(
-                merge_base, state.config.fork_ref, file_path
-            )
-            file_status = _parse_file_status(status_char)
-            language = detect_language(file_path)
+        changed_paths_map: dict[str, str] = {fp: sc for sc, fp in changed_files}
 
+        for file_path in sorted(actionable_paths):
+            status_char = changed_paths_map.get(file_path, "M")
+            cat = file_categories[file_path]
+
+            if cat == FileChangeCategory.D_MISSING:
+                file_status = FileStatus.ADDED
+                raw_diff = ""
+            else:
+                raw_diff = self.git_tool.get_unified_diff(
+                    merge_base, state.config.fork_ref, file_path
+                )
+                file_status = _parse_file_status(status_char)
+
+            language = detect_language(file_path)
             fd = build_file_diff(file_path, raw_diff, file_status)
             sensitive = is_security_sensitive(file_path, state.config.file_classifier)
             fd = fd.model_copy(
                 update={
                     "language": language,
                     "is_security_sensitive": sensitive,
+                    "change_category": cat,
                 }
             )
             score = compute_risk_score(fd, state.config.file_classifier)
@@ -190,17 +358,45 @@ class Orchestrator:
             )
             state.plan_judge_verdict = verdict
 
+            round_log = PlanReviewRound(
+                round_number=round_num,
+                verdict_result=verdict.result,
+                verdict_summary=verdict.summary,
+                issues_count=len(verdict.issues),
+                issues_detail=[
+                    {
+                        "file_path": issue.file_path,
+                        "reason": issue.reason,
+                        "current": issue.current_classification.value
+                        if hasattr(issue.current_classification, "value")
+                        else str(issue.current_classification),
+                        "suggested": issue.suggested_classification.value
+                        if hasattr(issue.suggested_classification, "value")
+                        else str(issue.suggested_classification),
+                    }
+                    for issue in verdict.issues
+                ],
+            )
+
             if verdict.result == PlanJudgeResult.APPROVED:
+                state.plan_review_log.append(round_log)
                 phase_result = phase_result.model_copy(
                     update={"status": "completed", "completed_at": datetime.now()}
                 )
                 state.phase_results[MergePhase.PLAN_REVIEW.value] = phase_result
+                write_plan_review_report(state, self.config.output.directory)
+                logger.info(
+                    "Plan approved by judge — awaiting human review before proceeding"
+                )
                 self.state_machine.transition(
-                    state, SystemStatus.AUTO_MERGING, "plan approved"
+                    state,
+                    SystemStatus.AWAITING_HUMAN,
+                    "plan approved by judge, awaiting human review",
                 )
                 return
 
             elif verdict.result == PlanJudgeResult.CRITICAL_REPLAN:
+                state.plan_review_log.append(round_log)
                 self.state_machine.transition(
                     state, SystemStatus.PLANNING, "critical replan required"
                 )
@@ -215,6 +411,14 @@ class Orchestrator:
                 )
                 state.current_phase = MergePhase.PLAN_REVISING
                 revised_plan = await self.planner.revise_plan(state, verdict.issues)
+                round_log = round_log.model_copy(
+                    update={
+                        "planner_revision_summary": (
+                            f"Revised plan with {len(verdict.issues)} issues addressed"
+                        )
+                    }
+                )
+                state.plan_review_log.append(round_log)
                 state.merge_plan = revised_plan
                 state.file_classifications = {
                     fp: batch.risk_level
@@ -226,10 +430,12 @@ class Orchestrator:
                 )
                 state.current_phase = MergePhase.PLAN_REVIEW
             else:
+                state.plan_review_log.append(round_log)
                 phase_result = phase_result.model_copy(
                     update={"status": "completed", "completed_at": datetime.now()}
                 )
                 state.phase_results[MergePhase.PLAN_REVIEW.value] = phase_result
+                write_plan_review_report(state, self.config.output.directory)
                 self.state_machine.transition(
                     state,
                     SystemStatus.AWAITING_HUMAN,
@@ -253,27 +459,60 @@ class Orchestrator:
         for fd in getattr(state, "_file_diffs", None) or []:
             file_diffs_map[fd.file_path] = fd
 
-        auto_safe_files: list[str] = []
-        for batch in state.merge_plan.phases:
-            if batch.risk_level in (RiskLevel.AUTO_SAFE, RiskLevel.DELETED_ONLY):
-                auto_safe_files.extend(batch.file_paths)
-
         batch_count = 0
-        for file_path in auto_safe_files:
-            fd = file_diffs_map.get(file_path)
-            if fd is None:
+        completed_layers: set[int] = set()
+        layer_index = self._build_layer_index(state)
+
+        for batch in state.merge_plan.phases:
+            if batch.risk_level not in (RiskLevel.AUTO_SAFE, RiskLevel.DELETED_ONLY):
                 continue
 
-            strategy = MergeDecision.TAKE_TARGET
-            if fd.risk_level == RiskLevel.DELETED_ONLY:
-                strategy = MergeDecision.SKIP
+            if batch.layer_id is not None:
+                self._verify_layer_deps(batch.layer_id, completed_layers, state)
 
-            record = await self.executor.execute_auto_merge(fd, strategy, state)
-            state.file_decision_records[file_path] = record
+            for file_path in batch.file_paths:
+                category = batch.change_category
+                if category is None:
+                    fd = file_diffs_map.get(file_path)
+                    category = fd.change_category if fd else None
 
-            batch_count += 1
-            if batch_count % 10 == 0:
-                self.checkpoint.save(state, f"phase2_batch_{batch_count}")
+                if category == FileChangeCategory.D_MISSING:
+                    record = await self.executor._copy_from_upstream(file_path, state)
+                    state.file_decision_records[file_path] = record
+                    batch_count += 1
+                    continue
+
+                fd = file_diffs_map.get(file_path)
+                if fd is None:
+                    continue
+
+                strategy = self.executor._select_strategy_by_category(
+                    category, batch.risk_level
+                )
+                record = await self.executor.execute_auto_merge(fd, strategy, state)
+                state.file_decision_records[file_path] = record
+                batch_count += 1
+
+                if batch_count % 10 == 0:
+                    self.checkpoint.save(state, f"phase2_batch_{batch_count}")
+
+            if batch.layer_id is not None and batch.layer_id not in completed_layers:
+                completed_layers.add(batch.layer_id)
+                layer_gates = self._get_layer_gates(batch.layer_id, layer_index)
+                if layer_gates:
+                    gate_ok = await self._run_gates(
+                        state, f"layer_{batch.layer_id}", layer_gates
+                    )
+                    if not gate_ok:
+                        gate_blocked = await self._handle_gate_failure(state)
+                        if gate_blocked:
+                            return
+
+        gate_ok = await self._run_gates(state, "auto_merge")
+        if not gate_ok:
+            gate_blocked = await self._handle_gate_failure(state)
+            if gate_blocked:
+                return
 
         has_risky = any(
             batch.risk_level in (RiskLevel.HUMAN_REQUIRED, RiskLevel.AUTO_RISKY)
@@ -363,18 +602,99 @@ class Orchestrator:
         )
         state.phase_results[MergePhase.JUDGE_REVIEW.value] = phase_result
 
-        readonly = ReadOnlyStateView(state)
-        msg = await self.judge.run(readonly)
-        verdict = msg.payload.get("verdict")
-        if verdict:
-            from src.models.judge import JudgeVerdict
+        max_rounds = self.config.max_judge_repair_rounds
+        state.judge_repair_rounds = 0
 
-            state.judge_verdict = JudgeVerdict.model_validate(verdict)
+        for round_num in range(max_rounds):
+            state.judge_repair_rounds = round_num
+
+            readonly = ReadOnlyStateView(state)
+            msg = await self.judge.run(readonly)
+            verdict_data = msg.payload.get("verdict")
+            if verdict_data:
+                from src.models.judge import JudgeVerdict as JV
+
+                state.judge_verdict = JV.model_validate(verdict_data)
+
+            customization_violations = self.judge.verify_customizations(
+                self.config.customizations
+            )
+            if state.judge_verdict and customization_violations:
+                state.judge_verdict = state.judge_verdict.model_copy(
+                    update={
+                        "customization_violations": customization_violations,
+                        "veto_triggered": True,
+                        "veto_reason": (
+                            f"Customization(s) lost: "
+                            f"{', '.join(v.customization_name for v in customization_violations)}"
+                        ),
+                        "verdict": VerdictType.FAIL,
+                    }
+                )
+
+            state.judge_verdicts_log.append(
+                {
+                    "round": round_num,
+                    "verdict": state.judge_verdict.verdict.value
+                    if state.judge_verdict
+                    else "none",
+                    "timestamp": datetime.now().isoformat(),
+                    "issues_count": len(state.judge_verdict.issues)
+                    if state.judge_verdict
+                    else 0,
+                    "veto": state.judge_verdict.veto_triggered
+                    if state.judge_verdict
+                    else False,
+                }
+            )
+
+            if state.judge_verdict is None:
+                break
+
+            if state.judge_verdict.verdict == VerdictType.PASS:
+                logger.info("Judge PASS on round %d", round_num)
+                break
+
+            if state.judge_verdict.veto_triggered:
+                logger.warning(
+                    "Judge VETO on round %d: %s",
+                    round_num,
+                    state.judge_verdict.veto_reason,
+                )
+                break
+
+            repair_instructions = self.judge.build_repair_instructions(
+                state.judge_verdict.issues
+            )
+            state.judge_verdict = state.judge_verdict.model_copy(
+                update={"repair_instructions": repair_instructions}
+            )
+
+            repairable = [r for r in repair_instructions if r.is_repairable]
+            if not repairable:
+                logger.info("No repairable issues on round %d, escalating", round_num)
+                break
+
+            if round_num < max_rounds - 1:
+                logger.info(
+                    "Repair round %d/%d: %d instructions",
+                    round_num + 1,
+                    max_rounds,
+                    len(repairable),
+                )
+                await self.executor.repair(repairable, state)
+                self.checkpoint.save(state, f"phase5_repair_{round_num}")
 
         phase_result = phase_result.model_copy(
             update={"status": "completed", "completed_at": datetime.now()}
         )
         state.phase_results[MergePhase.JUDGE_REVIEW.value] = phase_result
+
+        gate_ok = await self._run_gates(state, "judge_review")
+        if not gate_ok:
+            gate_blocked = await self._handle_gate_failure(state)
+            if gate_blocked:
+                return
 
         if state.judge_verdict is None:
             self.state_machine.transition(
@@ -384,12 +704,16 @@ class Orchestrator:
             )
             return
 
-        from src.models.judge import VerdictType
-
         verdict_type = state.judge_verdict.verdict
         if verdict_type == VerdictType.PASS:
             self.state_machine.transition(
                 state, SystemStatus.GENERATING_REPORT, "judge verdict: PASS"
+            )
+        elif state.judge_verdict.veto_triggered:
+            self.state_machine.transition(
+                state,
+                SystemStatus.AWAITING_HUMAN,
+                f"judge VETO: {state.judge_verdict.veto_reason}",
             )
         elif verdict_type == VerdictType.CONDITIONAL:
             self.state_machine.transition(
@@ -397,8 +721,114 @@ class Orchestrator:
             )
         else:
             self.state_machine.transition(
-                state, SystemStatus.FAILED, "judge verdict: FAIL"
+                state,
+                SystemStatus.AWAITING_HUMAN,
+                f"judge verdict: FAIL after {state.judge_repair_rounds + 1} rounds",
             )
+
+    async def _run_gates(
+        self,
+        state: MergeState,
+        phase_name: str,
+        layer_gates: list[object] | None = None,
+    ) -> bool:
+        from src.models.config import GateCommandConfig
+
+        gates: list[GateCommandConfig] = []
+        if layer_gates:
+            for gate in layer_gates:
+                if isinstance(gate, GateCommandConfig):
+                    gates.append(gate)
+                elif isinstance(gate, dict):
+                    gates.append(GateCommandConfig(**gate))
+
+        if not gates:
+            gates = list(self.config.gate.commands)
+
+        if not self.config.gate.enabled or not gates:
+            return True
+
+        report = await self.gate_runner.run_all_gates(
+            gates,
+            state.gate_baselines or None,
+        )
+
+        state.gate_history.append(
+            {
+                "phase": phase_name,
+                "timestamp": datetime.now().isoformat(),
+                "all_passed": report.all_passed,
+                "results": [r.model_dump(mode="json") for r in report.results],
+            }
+        )
+
+        if report.all_passed:
+            state.consecutive_gate_failures = 0
+            return True
+
+        state.consecutive_gate_failures += 1
+        failed_names = [r.gate_name for r in report.results if not r.passed]
+        logger.warning(
+            "Gate check failed for %s: %s (consecutive: %d/%d)",
+            phase_name,
+            failed_names,
+            state.consecutive_gate_failures,
+            self.config.gate.max_consecutive_failures,
+        )
+        return False
+
+    async def _handle_gate_failure(self, state: MergeState) -> bool:
+        if state.consecutive_gate_failures >= self.config.gate.max_consecutive_failures:
+            logger.error(
+                "Gate consecutive failures (%d) reached limit (%d), escalating to human",
+                state.consecutive_gate_failures,
+                self.config.gate.max_consecutive_failures,
+            )
+            self.state_machine.transition(
+                state,
+                SystemStatus.AWAITING_HUMAN,
+                f"gate failures exceeded limit ({state.consecutive_gate_failures}/"
+                f"{self.config.gate.max_consecutive_failures})",
+            )
+            return True
+        return False
+
+    def _verify_layer_deps(
+        self,
+        layer_id: int,
+        completed_layers: set[int],
+        state: MergeState,
+    ) -> None:
+        if state.merge_plan is None or not state.merge_plan.layers:
+            return
+        for layer in state.merge_plan.layers:
+            if layer.layer_id == layer_id:
+                missing = [
+                    dep for dep in layer.depends_on if dep not in completed_layers
+                ]
+                if missing:
+                    logger.warning(
+                        "Layer %d (%s) depends on incomplete layers: %s",
+                        layer_id,
+                        layer.name,
+                        missing,
+                    )
+                return
+
+    def _build_layer_index(self, state: MergeState) -> dict[int, MergeLayer]:
+        if state.merge_plan is None or not state.merge_plan.layers:
+            return {}
+        return {layer.layer_id: layer for layer in state.merge_plan.layers}
+
+    def _get_layer_gates(
+        self,
+        layer_id: int,
+        layer_index: dict[int, MergeLayer],
+    ) -> list[object] | None:
+        layer = layer_index.get(layer_id)
+        if layer is None or not layer.gate_commands:
+            return None
+        return list(layer.gate_commands)
 
     async def _run_phase6(self, state: MergeState) -> None:
         state.current_phase = MergePhase.REPORT

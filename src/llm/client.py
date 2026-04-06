@@ -37,12 +37,16 @@ class AnthropicClient(LLMClient):
         temperature: float,
         max_tokens: int,
         max_retries: int,
+        base_url: str | None = None,
     ):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_retries = max_retries
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+        kwargs: dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        self._client = anthropic.AsyncAnthropic(**kwargs)
 
     async def complete(
         self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
@@ -103,12 +107,16 @@ class OpenAIClient(LLMClient):
         temperature: float,
         max_tokens: int,
         max_retries: int,
+        base_url: str | None = None,
     ):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_retries = max_retries
-        self._client = openai.AsyncOpenAI(api_key=api_key)
+        kwargs: dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        self._client = openai.AsyncOpenAI(**kwargs)
 
     async def complete(
         self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
@@ -172,6 +180,16 @@ class LLMClientFactory:
                 f"Required env var '{config.api_key_env}' is not set. "
                 f"Needed for agent using {config.provider}/{config.model}."
             )
+        base_url: str | None = None
+        if config.api_base_url_env:
+            base_url = os.environ.get(config.api_base_url_env) or None
+        if not base_url:
+            default_env = (
+                "ANTHROPIC_BASE_URL"
+                if config.provider == "anthropic"
+                else "OPENAI_BASE_URL"
+            )
+            base_url = os.environ.get(default_env) or None
         if config.provider == "anthropic":
             return AnthropicClient(
                 model=config.model,
@@ -179,13 +197,17 @@ class LLMClientFactory:
                 temperature=config.temperature,
                 max_tokens=config.max_tokens,
                 max_retries=config.max_retries,
+                base_url=base_url,
             )
         elif config.provider == "openai":
+            if base_url and not base_url.rstrip("/").endswith("/v1"):
+                base_url = base_url.rstrip("/") + "/v1"
             return OpenAIClient(
                 model=config.model,
                 api_key=api_key,
                 temperature=config.temperature,
                 max_tokens=config.max_tokens,
                 max_retries=config.max_retries,
+                base_url=base_url,
             )
         raise ValueError(f"Unknown provider: {config.provider}")

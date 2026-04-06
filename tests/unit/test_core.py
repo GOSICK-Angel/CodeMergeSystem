@@ -12,7 +12,7 @@ from src.core.state_machine import StateMachine, VALID_TRANSITIONS
 from src.models.config import MergeConfig, ThresholdConfig
 from src.models.conflict import ConflictAnalysis, ConflictType
 from src.models.decision import MergeDecision
-from src.models.diff import FileDiff, FileStatus, RiskLevel
+from src.models.diff import FileDiff, FileChangeCategory, FileStatus, RiskLevel
 from src.models.judge import JudgeVerdict, VerdictType
 from src.models.message import AgentMessage, AgentType, MessageType
 from src.models.plan import MergePlan, MergePhase, PhaseFileBatch, RiskSummary
@@ -912,6 +912,21 @@ class TestOrchestratorWithMocks:
                     "src.core.orchestrator.classify_file",
                     return_value=RiskLevel.AUTO_SAFE,
                 ),
+                patch(
+                    "src.core.orchestrator.classify_all_files",
+                    return_value={"src/foo.py": FileChangeCategory.C},
+                ),
+                patch(
+                    "src.core.orchestrator.category_summary",
+                    return_value={
+                        "unchanged": 0,
+                        "upstream_only": 0,
+                        "both_changed": 1,
+                        "upstream_new": 0,
+                        "current_only_file": 0,
+                        "current_only_change": 0,
+                    },
+                ),
             ):
                 mock_fd = _make_file_diff()
                 mock_build.return_value = mock_fd
@@ -922,6 +937,7 @@ class TestOrchestratorWithMocks:
 
         assert state.status == SystemStatus.PLANNING
         assert len(getattr(state, "_file_diffs", [])) == 1
+        assert state.file_categories == {"src/foo.py": FileChangeCategory.C}
 
     async def test_run_phase1_transitions_to_plan_reviewing(self, tmp_path):
         from src.core.orchestrator import Orchestrator
@@ -992,7 +1008,9 @@ class TestOrchestratorWithMocks:
             state.merge_plan = _make_merge_plan()
             await orch._run_phase1_5(state)
 
-        assert state.status == SystemStatus.AUTO_MERGING
+        assert state.status == SystemStatus.AWAITING_HUMAN
+        assert len(state.plan_review_log) == 1
+        assert state.plan_review_log[0].verdict_result == PlanJudgeResult.APPROVED
 
     async def test_run_phase1_5_exceeds_max_rounds_awaiting_human(self, tmp_path):
         from src.core.orchestrator import Orchestrator
@@ -1164,6 +1182,8 @@ class TestOrchestratorWithMocks:
             msg = MagicMock()
             msg.payload = {"verdict": judge_verdict.model_dump()}
             orch.judge.run = AsyncMock(return_value=msg)
+            orch.judge.verify_customizations = MagicMock(return_value=[])
+            orch.judge.build_repair_instructions = MagicMock(return_value=[])
 
             state = _make_state(config)
             state.status = SystemStatus.JUDGE_REVIEWING
@@ -1203,12 +1223,14 @@ class TestOrchestratorWithMocks:
             msg = MagicMock()
             msg.payload = {"verdict": judge_verdict.model_dump()}
             orch.judge.run = AsyncMock(return_value=msg)
+            orch.judge.verify_customizations = MagicMock(return_value=[])
+            orch.judge.build_repair_instructions = MagicMock(return_value=[])
 
             state = _make_state(config)
             state.status = SystemStatus.JUDGE_REVIEWING
             await orch._run_phase5(state)
 
-        assert state.status == SystemStatus.FAILED
+        assert state.status == SystemStatus.AWAITING_HUMAN
 
     async def test_run_phase5_conditional_verdict_awaiting_human(self, tmp_path):
         from src.core.orchestrator import Orchestrator
@@ -1242,6 +1264,8 @@ class TestOrchestratorWithMocks:
             msg = MagicMock()
             msg.payload = {"verdict": judge_verdict.model_dump()}
             orch.judge.run = AsyncMock(return_value=msg)
+            orch.judge.verify_customizations = MagicMock(return_value=[])
+            orch.judge.build_repair_instructions = MagicMock(return_value=[])
 
             state = _make_state(config)
             state.status = SystemStatus.JUDGE_REVIEWING
@@ -1268,6 +1292,8 @@ class TestOrchestratorWithMocks:
             msg = MagicMock()
             msg.payload = {}
             orch.judge.run = AsyncMock(return_value=msg)
+            orch.judge.verify_customizations = MagicMock(return_value=[])
+            orch.judge.build_repair_instructions = MagicMock(return_value=[])
 
             state = _make_state(config)
             state.status = SystemStatus.JUDGE_REVIEWING

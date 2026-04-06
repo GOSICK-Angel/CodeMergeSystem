@@ -5,7 +5,15 @@ from src.models.message import AgentType, AgentMessage, MessageType
 from src.models.plan import MergePhase
 from src.models.diff import FileDiff, RiskLevel
 from src.models.decision import FileDecisionRecord
-from src.models.judge import JudgeVerdict, JudgeIssue, VerdictType, IssueSeverity
+from src.models.judge import (
+    JudgeVerdict,
+    JudgeIssue,
+    RepairInstruction,
+    CustomizationViolation,
+    VerdictType,
+    IssueSeverity,
+)
+from src.models.config import CustomizationEntry, CustomizationVerification
 from src.models.state import MergeState
 from src.core.read_only_state_view import ReadOnlyStateView
 from src.llm.prompts.judge_prompts import (
@@ -193,6 +201,145 @@ class JudgeAgent(BaseAgent):
             )
 
         return verdict
+
+    def verify_customizations(
+        self,
+        customizations: list[CustomizationEntry],
+    ) -> list[CustomizationViolation]:
+        if not self.git_tool or not customizations:
+            return []
+
+        violations: list[CustomizationViolation] = []
+
+        for entry in customizations:
+            for verif in entry.verification:
+                violation: CustomizationViolation | None = None
+                if verif.type == "grep":
+                    violation = self._verify_grep(entry.name, verif)
+                elif verif.type == "file_exists":
+                    violation = self._verify_file_exists(entry.name, verif)
+                elif verif.type == "function_exists":
+                    violation = self._verify_function_exists(entry.name, verif)
+                if violation:
+                    violations.append(violation)
+
+        return violations
+
+    def _verify_grep(
+        self,
+        customization_name: str,
+        verif: CustomizationVerification,
+    ) -> CustomizationViolation | None:
+        if not self.git_tool or not verif.pattern:
+            return None
+
+        results = self.git_tool.grep_in_files(verif.pattern, verif.files)
+        total_matches = sum(len(m) for m in results.values())
+        checked = list(results.keys()) if results else []
+
+        if not checked and verif.files:
+            import fnmatch
+
+            all_files = [
+                str(p.relative_to(self.git_tool.repo_path))
+                for p in self.git_tool.repo_path.rglob("*")
+                if p.is_file()
+            ]
+            for pattern in verif.files:
+                for fp in all_files:
+                    if fnmatch.fnmatch(fp, pattern):
+                        checked.append(fp)
+
+        if total_matches == 0:
+            return CustomizationViolation(
+                customization_name=customization_name,
+                verification_type="grep",
+                expected_pattern=verif.pattern,
+                checked_files=checked,
+                match_count=0,
+            )
+        return None
+
+    def _verify_file_exists(
+        self,
+        customization_name: str,
+        verif: CustomizationVerification,
+    ) -> CustomizationViolation | None:
+        if not self.git_tool:
+            return None
+
+        for fp in verif.files:
+            abs_path = self.git_tool.repo_path / fp
+            if not abs_path.exists():
+                return CustomizationViolation(
+                    customization_name=customization_name,
+                    verification_type="file_exists",
+                    expected_pattern=fp,
+                    checked_files=[fp],
+                    match_count=0,
+                )
+        return None
+
+    def _verify_function_exists(
+        self,
+        customization_name: str,
+        verif: CustomizationVerification,
+    ) -> CustomizationViolation | None:
+        if not self.git_tool or not verif.pattern:
+            return None
+
+        func_pattern = rf"(def|function|class|const|let|var)\s+{verif.pattern}"
+        results = self.git_tool.grep_in_files(func_pattern, verif.files)
+        total_matches = sum(len(m) for m in results.values())
+
+        checked: list[str] = []
+        if verif.files:
+            import fnmatch
+
+            all_files = [
+                str(p.relative_to(self.git_tool.repo_path))
+                for p in self.git_tool.repo_path.rglob("*")
+                if p.is_file()
+            ]
+            for pattern in verif.files:
+                for fp in all_files:
+                    if fnmatch.fnmatch(fp, pattern):
+                        checked.append(fp)
+
+        if total_matches == 0:
+            return CustomizationViolation(
+                customization_name=customization_name,
+                verification_type="function_exists",
+                expected_pattern=verif.pattern,
+                checked_files=checked,
+                match_count=0,
+            )
+        return None
+
+    def build_repair_instructions(
+        self, issues: list[JudgeIssue]
+    ) -> list[RepairInstruction]:
+        instructions: list[RepairInstruction] = []
+        for issue in issues:
+            if not issue.must_fix_before_merge:
+                continue
+
+            repairable = issue.issue_type in (
+                "syntax_error",
+                "unresolved_conflict",
+                "missing_upstream_addition",
+            )
+
+            instructions.append(
+                RepairInstruction(
+                    file_path=issue.file_path,
+                    instruction=issue.suggested_fix or issue.description,
+                    severity=issue.issue_level,
+                    is_repairable=repairable,
+                    source_issue_id=issue.issue_id,
+                )
+            )
+        return instructions
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus

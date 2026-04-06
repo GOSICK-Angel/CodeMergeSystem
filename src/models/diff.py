@@ -2,6 +2,15 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 
+class FileChangeCategory(str, Enum):
+    A = "unchanged"
+    B = "upstream_only"
+    C = "both_changed"
+    D_MISSING = "upstream_new"
+    D_EXTRA = "current_only"
+    E = "current_only_change"
+
+
 class FileStatus(str, Enum):
     ADDED = "added"
     DELETED = "deleted"
@@ -43,6 +52,7 @@ class FileDiff(BaseModel):
     lines_changed: int = 0
     conflict_count: int = 0
     hunks: list[DiffHunk] = Field(default_factory=list)
+    change_category: FileChangeCategory | None = None
     is_security_sensitive: bool = False
     language: str | None = None
     raw_diff: str | None = None

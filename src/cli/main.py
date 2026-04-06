@@ -7,6 +7,7 @@ from rich.console import Console
 from src.models.config import MergeConfig
 from src.core.checkpoint import Checkpoint
 from src.tools.report_writer import write_markdown_report, write_json_report
+from src.cli.env import load_env
 
 
 console = Console()
@@ -14,7 +15,7 @@ console = Console()
 
 @click.group()
 def cli() -> None:
-    pass
+    load_env()
 
 
 @cli.command("run")
@@ -96,6 +97,14 @@ def report_command(run_id: str, output: str) -> None:
         console.print(f"[red]Markdown report failed: {e}[/red]")
 
 
+@cli.command("init")
+def init_command() -> None:
+    """Interactive setup wizard for config and API keys"""
+    from src.cli.commands.init import init_command_impl
+
+    init_command_impl()
+
+
 @cli.command("validate")
 @click.option("--config", "-c", required=True, type=click.Path(exists=True))
 def validate_command(config: str) -> None:
@@ -163,7 +172,7 @@ def ui_command(
     """Start web UI for merge decisions"""
     from src.core.checkpoint import Checkpoint
 
-    cp = Checkpoint("./outputs")
+    cp = Checkpoint("./outputs/debug")
     if checkpoint:
         state = cp.load(Path(checkpoint))
     elif run_id:

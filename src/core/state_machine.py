@@ -31,12 +31,14 @@ VALID_TRANSITIONS: dict[SystemStatus, list[SystemStatus]] = {
         SystemStatus.FAILED,
     ],
     SystemStatus.AWAITING_HUMAN: [
+        SystemStatus.AUTO_MERGING,
         SystemStatus.ANALYZING_CONFLICTS,
         SystemStatus.JUDGE_REVIEWING,
         SystemStatus.FAILED,
     ],
     SystemStatus.JUDGE_REVIEWING: [
         SystemStatus.GENERATING_REPORT,
+        SystemStatus.AUTO_MERGING,
         SystemStatus.AWAITING_HUMAN,
         SystemStatus.ANALYZING_CONFLICTS,
         SystemStatus.FAILED,

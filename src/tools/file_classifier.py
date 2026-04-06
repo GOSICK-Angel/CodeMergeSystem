@@ -1,11 +1,16 @@
+from __future__ import annotations
+
 import fnmatch
 import json as json_lib
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from src.models.diff import FileDiff, RiskLevel, FileStatus
+from src.models.diff import FileDiff, FileChangeCategory, RiskLevel, FileStatus
 from src.models.config import FileClassifierConfig
+
+if TYPE_CHECKING:
+    from src.tools.git_tool import GitTool
 
 logger = logging.getLogger(__name__)
 
@@ -164,3 +169,58 @@ def classify_file(
         return RiskLevel.AUTO_RISKY
     else:
         return RiskLevel.HUMAN_REQUIRED
+
+
+def classify_three_way(
+    file_path: str,
+    merge_base: str,
+    head_ref: str,
+    upstream_ref: str,
+    git_tool: GitTool,
+) -> FileChangeCategory:
+    base_hash = git_tool.get_file_hash(merge_base, file_path)
+    head_hash = git_tool.get_file_hash(head_ref, file_path)
+    up_hash = git_tool.get_file_hash(upstream_ref, file_path)
+
+    if head_hash is None and up_hash is not None:
+        return FileChangeCategory.D_MISSING
+    if head_hash is not None and up_hash is None:
+        return FileChangeCategory.D_EXTRA
+    if head_hash is None and up_hash is None:
+        return FileChangeCategory.A
+    if head_hash == up_hash:
+        return FileChangeCategory.A
+    if head_hash == base_hash:
+        return FileChangeCategory.B
+    if up_hash == base_hash:
+        return FileChangeCategory.E
+    return FileChangeCategory.C
+
+
+def classify_all_files(
+    merge_base: str,
+    head_ref: str,
+    upstream_ref: str,
+    git_tool: GitTool,
+) -> dict[str, FileChangeCategory]:
+    head_files = set(git_tool.list_files(head_ref))
+    upstream_files = set(git_tool.list_files(upstream_ref))
+    all_paths = head_files | upstream_files
+
+    result: dict[str, FileChangeCategory] = {}
+    for file_path in sorted(all_paths):
+        result[file_path] = classify_three_way(
+            file_path, merge_base, head_ref, upstream_ref, git_tool
+        )
+    return result
+
+
+def category_summary(
+    categories: dict[str, FileChangeCategory],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for cat in FileChangeCategory:
+        counts[cat.value] = 0
+    for cat in categories.values():
+        counts[cat.value] = counts.get(cat.value, 0) + 1
+    return counts

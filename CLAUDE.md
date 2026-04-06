@@ -40,6 +40,7 @@ These are load-bearing design rules enforced by unit tests — do not violate th
 - **Plan dispute does not modify `risk_level`** — `raise_plan_dispute()` only appends to `state.plan_disputes`
 - **HumanInterface never fills defaults** — skipped items keep `ESCALATE_HUMAN` status until the user explicitly decides
 - **Plan revision limit** — when `plan_revision_rounds >= max_plan_revision_rounds`, transition to `AWAITING_HUMAN`, not `FAILED`
+- **Plan human review is mandatory** — after PlannerJudge approves the plan, the system transitions to `AWAITING_HUMAN` (not directly to `AUTO_MERGING`). The human must set `state.plan_human_review` with a `PlanHumanDecision` (approve/reject/modify) before the system proceeds. A `plan_review_<run_id>.md` report is generated in `output.directory`, documenting all planner-judge interaction rounds and the human review record.
 
 ## Configuration
 

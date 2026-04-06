@@ -32,6 +32,32 @@ class JudgeIssue(BaseModel):
     must_fix_before_merge: bool = False
 
 
+class RepairInstruction(BaseModel):
+    file_path: str
+    instruction: str
+    severity: IssueSeverity = IssueSeverity.HIGH
+    is_repairable: bool = True
+    source_issue_id: str | None = None
+
+
+class CustomizationViolation(BaseModel):
+    customization_name: str
+    verification_type: str
+    expected_pattern: str
+    checked_files: list[str] = Field(default_factory=list)
+    match_count: int = 0
+
+
+VETO_CONDITIONS: list[str] = [
+    "B-class file differs from upstream",
+    "D-missing file not present in HEAD",
+    "Customization disappeared without annotation",
+    "Upstream function block (>20 lines) missing in merged",
+    "TODO [merge] count exceeds phase limit",
+    "Unannotated TODO [check] exists",
+]
+
+
 class JudgeVerdict(BaseModel):
     verdict_id: str = Field(default_factory=lambda: str(uuid4()))
     verdict: VerdictType
@@ -47,3 +73,7 @@ class JudgeVerdict(BaseModel):
     blocking_issues: list[str]
     timestamp: datetime
     judge_model: str
+    veto_triggered: bool = False
+    veto_reason: str | None = None
+    repair_instructions: list[RepairInstruction] = Field(default_factory=list)
+    customization_violations: list[CustomizationViolation] = Field(default_factory=list)

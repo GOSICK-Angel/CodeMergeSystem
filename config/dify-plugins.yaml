@@ -1,0 +1,96 @@
+upstream_ref: "upstream/main"
+fork_ref: "origin/cvte-main"
+working_branch: "merge/auto-{timestamp}"
+repo_path: "/Users/angel/Desktop/WA_AI/project/dify-official-plugins"
+project_context: >
+  Dify official plugins monorepo. Contains models, tools, extensions,and triggers as independent plugin packages, each with its own manifest.yaml, pyproject.toml, and uv.lock. The cvte-main branch carries custom modifications (naming, CI, model configs) on top of the upstream main branch.Plugins with cvte as the author in the manifest.yaml file need to be carefully evaluated. If they contain customized content, be careful not to modify the author
+max_files_per_run: 50
+max_plan_revision_rounds: 2
+
+agents:
+  planner:
+    provider: "anthropic"
+    model: "claude-opus-4-6"
+    temperature: 0.2
+    max_tokens: 8192
+    max_retries: 3
+    api_key_env: "ANTHROPIC_API_KEY"
+  planner_judge:
+    provider: "openai"
+    model: "gpt-5.4"
+    temperature: 0.2
+    max_tokens: 8192
+    max_retries: 3
+    api_key_env: "OPENAI_API_KEY"
+  conflict_analyst:
+    provider: "anthropic"
+    model: "claude-sonnet-4-6"
+    temperature: 0.2
+    max_tokens: 8192
+    max_retries: 3
+    api_key_env: "ANTHROPIC_API_KEY"
+  executor:
+    provider: "openai"
+    model: "gpt-4o"
+    temperature: 0.1
+    max_tokens: 8192
+    max_retries: 3
+    api_key_env: "OPENAI_API_KEY"
+  judge:
+    provider: "anthropic"
+    model: "claude-opus-4-6"
+    temperature: 0.1
+    max_tokens: 8192
+    max_retries: 3
+    api_key_env: "ANTHROPIC_API_KEY"
+  human_interface:
+    provider: "anthropic"
+    model: "claude-haiku-4-5-20251001"
+    temperature: 0.2
+    max_tokens: 4096
+    max_retries: 3
+    api_key_env: "ANTHROPIC_API_KEY"
+
+thresholds:
+  auto_merge_confidence: 0.85
+  human_escalation: 0.60
+  risk_score_low: 0.30
+  risk_score_high: 0.60
+
+file_classifier:
+  excluded_patterns:
+    - "**/*.lock"
+    - "**/node_modules/**"
+    - "**/.git/**"
+    - "**/__pycache__/**"
+  binary_extensions:
+    - ".png"
+    - ".jpg"
+    - ".pdf"
+    - ".zip"
+    - ".tar"
+    - ".whl"
+    - ".ico"
+    - ".svg"
+  always_take_target_patterns: []
+  always_take_current_patterns: []
+  security_sensitive:
+    patterns:
+      - "**/auth/**"
+      - "**/security/**"
+      - "**/*secret*"
+      - "**/*credential*"
+      - "**/*password*"
+      - "**/*.pem"
+      - "**/*.key"
+    always_require_human: true
+
+output:
+  directory: "./outputs"
+  debug_directory: "./outputs/debug"
+  formats:
+    - "json"
+    - "markdown"
+  include_raw_diffs: false
+  include_llm_traces: true
+  language: "zh"

@@ -5,11 +5,12 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 from src.models.config import MergeConfig
 from src.models.plan import MergePlan, MergePhase
-from src.models.diff import RiskLevel
+from src.models.diff import RiskLevel, FileChangeCategory
 from src.models.decision import MergeDecision, FileDecisionRecord
 from src.models.judge import JudgeVerdict
 from src.models.human import HumanDecisionRequest
 from src.models.plan_judge import PlanJudgeVerdict
+from src.models.plan_review import PlanReviewRound, PlanHumanReview
 from src.models.dispute import PlanDisputeRequest
 from src.models.conflict import ConflictAnalysis
 
@@ -47,9 +48,13 @@ class MergeState(BaseModel):
 
     merge_plan: MergePlan | None = None
     file_classifications: dict[str, RiskLevel] = Field(default_factory=dict)
+    file_categories: dict[str, FileChangeCategory] = Field(default_factory=dict)
+    merge_base_commit: str = ""
     plan_revision_rounds: int = 0
 
     plan_judge_verdict: PlanJudgeVerdict | None = None
+    plan_review_log: list[PlanReviewRound] = Field(default_factory=list)
+    plan_human_review: PlanHumanReview | None = None
 
     file_decision_records: dict[str, FileDecisionRecord] = Field(default_factory=dict)
     applied_patches: list[str] = Field(default_factory=list)
@@ -63,6 +68,15 @@ class MergeState(BaseModel):
     human_decisions: dict[str, MergeDecision] = Field(default_factory=dict)
 
     judge_verdict: JudgeVerdict | None = None
+    judge_repair_rounds: int = 0
+    judge_verdicts_log: list[dict[str, Any]] = Field(default_factory=list)
+
+    gate_baselines: dict[str, str] = Field(
+        default_factory=dict,
+        description="gate_name -> stdout_tail baseline output",
+    )
+    gate_history: list[dict[str, Any]] = Field(default_factory=list)
+    consecutive_gate_failures: int = 0
 
     errors: list[dict[str, Any]] = Field(default_factory=list)
     messages: list[dict[str, Any]] = Field(default_factory=list)

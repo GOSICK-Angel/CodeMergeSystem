@@ -228,6 +228,8 @@ class LLMClientFactory:
 - PlannerJudge 的最终结论由 Orchestrator 代理写入 `MergeState.plan_judge_verdict`。
 - 若 PlannerJudge 与 Planner 发生分歧，**则 PlannerJudge 与 Planner 需要讨论，直到达成一致**。
 - 最多允许 `config.max_plan_revision_rounds`（默认 2）轮修订，超出后升级为人工干预。
+- **每一轮交互都会被记录到 `state.plan_review_log`**（`PlanReviewRound` 列表），包含 verdict、issues、planner 修订摘要。
+- **计划通过（APPROVED）后不直接进入执行**，而是生成 `plan_review_<run_id>.md` 报告（包含全部交互记录），转入 `AWAITING_HUMAN` 等待人类审查。人类通过设置 `state.plan_human_review`（approve/reject/modify）决定是否继续。审查结果同样写入报告，供调试 Planner 和 PlannerJudge 行为。
 
 ---
 
@@ -335,7 +337,9 @@ Orchestrator
     │
     ├── Phase 1:   [Planner]                          → 生成 MergePlan
     ├── Phase 1.5: [PlannerJudge]                     → 审查计划质量
-    │               ├── APPROVED  → 进入 Phase 2
+    │               ├── APPROVED  → 生成 plan_review 报告 → AWAITING_HUMAN
+    │               │                                        ├── approve → Phase 2
+    │               │                                        └── reject  → FAILED
     │               ├── REVISION_NEEDED → 返回 Planner 修订（最多 2 轮）
     │               └── CRITICAL_REPLAN → Planner 完整重规划
     │

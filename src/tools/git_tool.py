@@ -13,8 +13,11 @@ class GitTool:
         self.repo_path = Path(self.repo.working_tree_dir)
 
     def get_merge_base(self, upstream_ref: str, fork_ref: str) -> str:
-        result = self.repo.git.merge_base(upstream_ref, fork_ref)
-        return str(result).strip()
+        try:
+            result = self.repo.git.merge_base(upstream_ref, fork_ref)
+            return str(result).strip()
+        except git.GitCommandError:
+            return str(self.repo.git.rev_parse(upstream_ref)).strip()
 
     def get_changed_files(self, base: str, head: str) -> list[tuple[str, str]]:
         diff_output = self.repo.git.diff("--name-status", base, head)
@@ -104,4 +107,57 @@ class GitTool:
                 status_code = line[:2].strip()
                 path = line[3:].strip()
                 results.append((status_code, path))
+        return results
+
+    def get_file_hash(self, ref: str, file_path: str) -> str | None:
+        try:
+            return str(self.repo.git.rev_parse(f"{ref}:{file_path}")).strip()
+        except git.GitCommandError:
+            return None
+
+    def list_files(self, ref: str) -> list[str]:
+        try:
+            output = self.repo.git.ls_tree("-r", "--name-only", ref)
+            return [line.strip() for line in output.splitlines() if line.strip()]
+        except git.GitCommandError:
+            return []
+
+    def file_exists_at_ref(self, ref: str, file_path: str) -> bool:
+        return self.get_file_hash(ref, file_path) is not None
+
+    def grep_in_file(self, pattern: str, file_path: str) -> list[str]:
+        import re
+
+        abs_path = self.repo_path / file_path
+        if not abs_path.exists():
+            return []
+        try:
+            content = abs_path.read_text(encoding="utf-8")
+            return re.findall(pattern, content)
+        except Exception:
+            return []
+
+    def grep_in_files(
+        self, pattern: str, file_patterns: list[str]
+    ) -> dict[str, list[str]]:
+        import fnmatch
+        import re
+
+        all_files = [
+            str(p.relative_to(self.repo_path))
+            for p in self.repo_path.rglob("*")
+            if p.is_file()
+        ]
+
+        target_files: list[str] = []
+        for glob_pat in file_patterns:
+            for fp in all_files:
+                if fnmatch.fnmatch(fp, glob_pat):
+                    target_files.append(fp)
+
+        results: dict[str, list[str]] = {}
+        for fp in target_files:
+            matches = self.grep_in_file(pattern, fp)
+            if matches:
+                results[fp] = matches
         return results

@@ -3,10 +3,10 @@ from src.agents.base_agent import BaseAgent
 from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage, MessageType
 from src.models.plan import MergePhase
-from src.models.diff import FileDiff, RiskLevel
+from src.models.diff import FileDiff, FileChangeCategory, RiskLevel, FileStatus
 from src.models.conflict import ConflictAnalysis
 from src.models.decision import MergeDecision, FileDecisionRecord, DecisionSource
-from src.models.diff import FileStatus
+from src.models.judge import RepairInstruction
 from src.models.human import HumanDecisionRequest
 from src.models.dispute import PlanDisputeRequest
 from src.models.state import MergeState
@@ -51,12 +51,24 @@ class ExecutorAgent(BaseAgent):
 
             for file_path in batch.file_paths:
                 fd = file_diffs_map.get(file_path)
-                if fd is None:
+                category = batch.change_category or (fd.change_category if fd else None)
+                strategy = self._select_strategy_by_category(category, batch.risk_level)
+
+                if strategy == MergeDecision.SKIP:
+                    if fd is not None:
+                        record = await self.execute_auto_merge(fd, strategy, state)
+                        state.file_decision_records[file_path] = record
+                        processed += 1
                     continue
 
-                strategy = MergeDecision.TAKE_TARGET
-                if batch.risk_level == RiskLevel.DELETED_ONLY:
-                    strategy = MergeDecision.SKIP
+                if category == FileChangeCategory.D_MISSING:
+                    record = await self._copy_from_upstream(file_path, state)
+                    state.file_decision_records[file_path] = record
+                    processed += 1
+                    continue
+
+                if fd is None:
+                    continue
 
                 record = await self.execute_auto_merge(fd, strategy, state)
                 state.file_decision_records[file_path] = record
@@ -69,6 +81,62 @@ class ExecutorAgent(BaseAgent):
             message_type=MessageType.PHASE_COMPLETED,
             subject=f"Processed {processed} auto-merge files",
             payload={"processed": processed, "disputes": disputes},
+        )
+
+    def _select_strategy_by_category(
+        self,
+        category: FileChangeCategory | None,
+        risk_level: RiskLevel,
+    ) -> MergeDecision:
+        if category == FileChangeCategory.B:
+            return MergeDecision.TAKE_TARGET
+        if category == FileChangeCategory.D_MISSING:
+            return MergeDecision.TAKE_TARGET
+        if category == FileChangeCategory.A or category == FileChangeCategory.E:
+            return MergeDecision.SKIP
+        if category == FileChangeCategory.D_EXTRA:
+            return MergeDecision.SKIP
+        if category == FileChangeCategory.C:
+            if risk_level == RiskLevel.HUMAN_REQUIRED:
+                return MergeDecision.ESCALATE_HUMAN
+            if risk_level == RiskLevel.AUTO_RISKY:
+                return MergeDecision.SEMANTIC_MERGE
+            return MergeDecision.TAKE_TARGET
+        if risk_level == RiskLevel.DELETED_ONLY:
+            return MergeDecision.SKIP
+        return MergeDecision.TAKE_TARGET
+
+    async def _copy_from_upstream(
+        self, file_path: str, state: MergeState
+    ) -> FileDecisionRecord:
+        if self.git_tool is None:
+            return create_escalate_record(
+                file_path, "No git tool available", phase="auto_merge", agent="executor"
+            )
+
+        content = self.git_tool.get_file_content(state.config.upstream_ref, file_path)
+        if content is None:
+            return create_escalate_record(
+                file_path,
+                "Could not fetch upstream content for D-missing file",
+                phase="auto_merge",
+                agent="executor",
+            )
+
+        current_phase_str = (
+            state.current_phase.value
+            if hasattr(state.current_phase, "value")
+            else str(state.current_phase)
+        )
+        return await apply_with_snapshot(
+            file_path,
+            content,
+            self.git_tool,
+            state,
+            phase=current_phase_str,
+            agent="executor",
+            decision=MergeDecision.TAKE_TARGET,
+            rationale="D-missing: copying new file from upstream",
         )
 
     async def execute_auto_merge(
@@ -277,6 +345,66 @@ class ExecutorAgent(BaseAgent):
             agent=record.agent,
             timestamp=datetime.now(),
         )
+
+    async def repair(
+        self,
+        instructions: list[RepairInstruction],
+        state: MergeState,
+    ) -> list[FileDecisionRecord]:
+        if self.git_tool is None:
+            return []
+
+        results: list[FileDecisionRecord] = []
+        current_phase_str = (
+            state.current_phase.value
+            if hasattr(state.current_phase, "value")
+            else str(state.current_phase)
+        )
+
+        for instr in instructions:
+            if not instr.is_repairable:
+                continue
+
+            current_content = self.git_tool.get_file_content(
+                state.config.fork_ref, instr.file_path
+            )
+            target_content = self.git_tool.get_file_content(
+                state.config.upstream_ref, instr.file_path
+            )
+
+            if current_content is None and target_content is None:
+                continue
+
+            prompt = (
+                f"Repair the file '{instr.file_path}' based on this instruction:\n"
+                f"{instr.instruction}\n\n"
+                f"Current content:\n```\n{current_content or '(file does not exist)'}\n```\n\n"
+                f"Upstream content:\n```\n{target_content or '(file does not exist)'}\n```\n\n"
+                "Output ONLY the repaired file content, no explanation."
+            )
+            messages = [{"role": "user", "content": prompt}]
+
+            try:
+                raw = await self._call_llm_with_retry(messages, system=EXECUTOR_SYSTEM)
+                repaired = parse_merge_result(str(raw))
+            except Exception as exc:
+                self.logger.warning("Repair failed for %s: %s", instr.file_path, exc)
+                continue
+
+            record = await apply_with_snapshot(
+                instr.file_path,
+                repaired,
+                self.git_tool,
+                state,
+                phase=current_phase_str,
+                agent="executor",
+                decision=MergeDecision.SEMANTIC_MERGE,
+                rationale=f"Repair: {instr.instruction}",
+            )
+            results.append(record)
+            state.file_decision_records[instr.file_path] = record
+
+        return results
 
     def raise_plan_dispute(
         self,

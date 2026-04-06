@@ -20,10 +20,10 @@ def resume_command_impl(
         if not cp_path.exists():
             console.print(f"[red]Checkpoint not found: {checkpoint_path}[/red]")
             sys.exit(1)
-        checkpoint = Checkpoint("./outputs")
+        checkpoint = Checkpoint("./outputs/debug")
         state = checkpoint.load(cp_path)
     elif run_id:
-        checkpoint = Checkpoint("./outputs")
+        checkpoint = Checkpoint("./outputs/debug")
         latest = checkpoint.get_latest(run_id)
         if latest is None:
             console.print(f"[red]No checkpoint found for run_id: {run_id}[/red]")

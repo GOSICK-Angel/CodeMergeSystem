@@ -51,11 +51,15 @@ def _validate_confidence(value: float) -> float:
 
 def _validate_enum(value: str, enum_class: Any, field_name: str) -> str:
     valid_values = {e.value for e in enum_class}
-    if value not in valid_values:
-        raise ParseError(
-            f"Invalid {field_name} value '{value}'. Must be one of: {valid_values}"
-        )
-    return value
+    if value in valid_values:
+        return value
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    for v in valid_values:
+        if normalized == v or normalized.startswith(v):
+            return str(v)
+    raise ParseError(
+        f"Invalid {field_name} value '{value}'. Must be one of: {valid_values}"
+    )
 
 
 def parse_plan_judge_verdict(
@@ -71,13 +75,20 @@ def parse_plan_judge_verdict(
     for issue_data in data.get("issues", []):
         current_raw = issue_data.get("current_classification", "auto_safe")
         suggested_raw = issue_data.get("suggested_classification", "human_required")
-        _validate_enum(current_raw, RiskLevel, "current_classification")
-        _validate_enum(suggested_raw, RiskLevel, "suggested_classification")
+        try:
+            current_val = _validate_enum(
+                current_raw, RiskLevel, "current_classification"
+            )
+            suggested_val = _validate_enum(
+                suggested_raw, RiskLevel, "suggested_classification"
+            )
+        except ParseError:
+            continue
         issues.append(
             PlanIssue(
                 file_path=issue_data.get("file_path", ""),
-                current_classification=RiskLevel(current_raw),
-                suggested_classification=RiskLevel(suggested_raw),
+                current_classification=RiskLevel(current_val),
+                suggested_classification=RiskLevel(suggested_val),
                 reason=issue_data.get("reason", ""),
                 issue_type=issue_data.get("issue_type", "risk_underestimated"),
             )

@@ -30,69 +30,134 @@ Key design principles:
 ## Installation
 
 ```bash
+# 1. Clone the repo (skip if already cloned)
+git clone <repo-url> && cd CodeMergeSystem
+
+# 2. Create a virtual environment (recommended)
+python3.11 -m venv .venv
+source .venv/bin/activate        # macOS / Linux
+# .venv\Scripts\activate         # Windows
+
+# 3. Install in editable mode with dev dependencies
 pip install -e ".[dev]"
+
+# 4. Verify installation
+merge --help                     # CLI should print usage
+mypy src                         # type check
+pytest tests/unit/ -q            # run tests
+```
+
+### Rebuild after code changes
+
+Any changes to source files under `src/` take effect immediately because editable mode (`-e`) links directly to the source tree. You only need to re-run `pip install` when dependencies in `pyproject.toml` change:
+
+```bash
+# After modifying pyproject.toml dependencies
+pip install -e ".[dev]"
+
+# Force full rebuild (clears cached artifacts)
+pip install -e ".[dev]" --no-build-isolation --force-reinstall
+```
+
+### Build a distributable wheel
+
+```bash
+pip install build                # install build tool (one-time)
+python -m build                  # outputs dist/*.whl and dist/*.tar.gz
+
+# Install the wheel on another machine
+pip install dist/code_merge_system-0.1.0-py3-none-any.whl
+```
+
+## Quick Start
+
+```bash
+# 1. Copy the default config template and edit it
+cp config/default.yaml config/my-merge.yaml
+
+# 2. Edit upstream_ref / fork_ref / repo_path to match your repository
+#    Set API keys in your shell:
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
+
+# 3. Validate config and environment
+merge validate --config config/my-merge.yaml
+
+# 4. Dry run (analysis only, no file writes)
+merge run --config config/my-merge.yaml --dry-run
+
+# 5. Run full merge
+merge run --config config/my-merge.yaml
 ```
 
 ## Usage
 
 ```bash
-# Validate config and environment before running
+# Validate config and check all required env vars
 merge validate --config config/my-merge.yaml
 
-# Run full merge
+# Full merge execution
 merge run --config config/my-merge.yaml
 
-# Dry run (analysis only, no file writes)
+# Dry run — only analyze, do not write files
 merge run --config config/my-merge.yaml --dry-run
 
-# Resume from checkpoint after interruption
+# CI mode — no interaction, exit codes, JSON summary to stdout
+merge run --config config/my-merge.yaml --ci
+
+# Export human decision template when the run pauses at AWAITING_HUMAN
+merge run --config config/my-merge.yaml --export-decisions decisions.yaml
+
+# Resume from checkpoint after interruption or human review
 merge resume --run-id <run-id>
 
-# Generate report from completed run
+# Resume with human decisions file
+merge resume --run-id <run-id> --decisions decisions.yaml
+
+# Generate reports from a completed run
 merge report --run-id <run-id> --output ./outputs
+
+# Interactive setup wizard (creates config + checks keys)
+merge init
+
+# Web UI for reviewing merge decisions
+merge ui --run-id <run-id> --port 8080
 ```
 
 ## Configuration
 
-Create a YAML config file:
+Copy `config/default.yaml` as your starting point, then edit the fields below:
+
+```bash
+cp config/default.yaml config/my-merge.yaml
+```
+
+The only fields you **must** change:
 
 ```yaml
-upstream_ref: "upstream/main"
-fork_ref: "feature/my-fork"
-repo_path: "."
-project_context: "A Python web service using FastAPI and PostgreSQL."
-max_plan_revision_rounds: 2
+upstream_ref: "upstream/main"       # the branch you want to merge FROM
+fork_ref: "feature/my-fork"         # your current branch
+repo_path: "."                      # path to the git repo (default: cwd)
+project_context: "Describe your project so LLMs understand the codebase."
+```
 
-agents:
-  planner:
-    provider: anthropic
-    model: claude-opus-4-6
-    api_key_env: ANTHROPIC_API_KEY
-  planner_judge:
-    provider: openai
-    model: gpt-4o
-    api_key_env: OPENAI_API_KEY
-  executor:
-    provider: openai
-    model: gpt-4o
-    temperature: 0.1
-    api_key_env: OPENAI_API_KEY
-  judge:
-    provider: anthropic
-    model: claude-opus-4-6
-    temperature: 0.1
-    api_key_env: ANTHROPIC_API_KEY
+Key tunable parameters (with defaults):
+
+```yaml
+max_plan_revision_rounds: 2         # Planner↔Judge max negotiation rounds
 
 thresholds:
-  auto_merge_confidence: 0.85
-  human_escalation: 0.60
+  auto_merge_confidence: 0.85       # above this → auto merge
+  human_escalation: 0.60            # below this → escalate to human
+  risk_score_low: 0.30              # below → AUTO_SAFE
+  risk_score_high: 0.60             # above → HUMAN_REQUIRED
 
 output:
-  directory: ./outputs
+  directory: ./outputs              # reports and checkpoints go here
   formats: [json, markdown]
 ```
 
-See `config/default.yaml` for the full configuration reference.
+See `config/default.yaml` for the full configuration reference including per-agent LLM settings.
 
 ## Development
 

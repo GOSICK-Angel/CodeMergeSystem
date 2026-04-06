@@ -4,16 +4,26 @@ from uuid import uuid4
 from src.agents.base_agent import BaseAgent
 from src.models.config import AgentLLMConfig, MergeConfig
 from src.models.message import AgentType, AgentMessage, MessageType
-from src.models.plan import MergePlan, MergePhase, PhaseFileBatch, RiskSummary
-from src.models.diff import FileDiff, RiskLevel
+from src.models.plan import (
+    MergePlan,
+    MergePhase,
+    PhaseFileBatch,
+    RiskSummary,
+    CategorySummary,
+    MergeLayer,
+    DEFAULT_LAYERS,
+)
+from src.models.diff import FileDiff, FileChangeCategory, RiskLevel
 from src.models.plan_judge import PlanIssue
 from src.models.state import MergeState
 from src.llm.prompts.planner_prompts import (
     PLANNER_SYSTEM,
+    get_planner_system,
     build_classification_prompt,
     build_revision_prompt,
 )
 from src.tools.file_classifier import compute_risk_score, classify_file
+import fnmatch
 import json
 import json as json_lib
 
@@ -48,32 +58,415 @@ class PlannerAgent(BaseAgent):
         else:
             all_file_diffs = []
 
-        if state.config.llm_risk_scoring.enabled:
-            await self._enhance_risk_scores(all_file_diffs, state.config)
+        if state.file_categories:
+            return self._build_layered_plan(all_file_diffs, state)
 
+        if state.config.llm_risk_scoring.enabled:
+            all_file_diffs = await self._enhance_risk_scores(
+                all_file_diffs, state.config
+            )
+
+        batch_size = state.config.max_files_per_run
+        batches = [
+            all_file_diffs[i : i + batch_size]
+            for i in range(0, len(all_file_diffs), batch_size)
+        ] or [[]]
+        total_batches = len(batches)
+
+        language = state.config.output.language
+        system_prompt = get_planner_system(language)
         project_context = state.config.project_context
 
-        prompt = build_classification_prompt(all_file_diffs, project_context)
+        self.logger.info(
+            "Planner (legacy): %d files, batch_size=%d, total_batches=%d",
+            len(all_file_diffs),
+            batch_size,
+            total_batches,
+        )
+
+        all_plan_data: list[dict[str, Any]] = []
+        for idx, batch in enumerate(batches):
+            self.logger.info(
+                "Classifying batch %d/%d (%d files)", idx + 1, total_batches, len(batch)
+            )
+            plan_data = await self._classify_batch(
+                batch, project_context, system_prompt, idx, total_batches
+            )
+            all_plan_data.append(plan_data)
+
+        merged_data = self._merge_batch_plans(all_plan_data, all_file_diffs)
+        return self._build_merge_plan(merged_data, state, all_file_diffs)
+
+    def _build_layered_plan(
+        self, file_diffs: list[FileDiff], state: MergeState
+    ) -> MergePlan:
+        layers = self._resolve_layers(state.config)
+        categories = state.file_categories
+        diffs_by_path = {fd.file_path: fd for fd in file_diffs}
+
+        actionable = {
+            FileChangeCategory.B,
+            FileChangeCategory.C,
+            FileChangeCategory.D_MISSING,
+        }
+        actionable_files = {
+            fp: cat for fp, cat in categories.items() if cat in actionable
+        }
+
+        file_layer_map = self._assign_files_to_layers(
+            list(actionable_files.keys()), layers
+        )
+
+        phases: list[PhaseFileBatch] = []
+
+        for layer in sorted(layers, key=lambda ly: ly.layer_id):
+            layer_files = file_layer_map.get(layer.layer_id, [])
+            if not layer_files:
+                continue
+
+            by_category: dict[FileChangeCategory, list[str]] = {}
+            for fp in layer_files:
+                cat = actionable_files[fp]
+                by_category.setdefault(cat, []).append(fp)
+
+            b_files = by_category.get(FileChangeCategory.B, [])
+            if b_files:
+                phases.append(
+                    PhaseFileBatch(
+                        batch_id=str(uuid4()),
+                        phase=MergePhase.AUTO_MERGE,
+                        file_paths=sorted(b_files),
+                        risk_level=RiskLevel.AUTO_SAFE,
+                        layer_id=layer.layer_id,
+                        change_category=FileChangeCategory.B,
+                        can_parallelize=True,
+                    )
+                )
+
+            d_files = by_category.get(FileChangeCategory.D_MISSING, [])
+            if d_files:
+                phases.append(
+                    PhaseFileBatch(
+                        batch_id=str(uuid4()),
+                        phase=MergePhase.AUTO_MERGE,
+                        file_paths=sorted(d_files),
+                        risk_level=RiskLevel.AUTO_SAFE,
+                        layer_id=layer.layer_id,
+                        change_category=FileChangeCategory.D_MISSING,
+                        can_parallelize=True,
+                    )
+                )
+
+            c_files = by_category.get(FileChangeCategory.C, [])
+            if c_files:
+                c_safe = []
+                c_risky = []
+                c_human = []
+                for fp in c_files:
+                    fd = diffs_by_path.get(fp)
+                    if fd is None:
+                        c_risky.append(fp)
+                        continue
+                    if fd.risk_level == RiskLevel.HUMAN_REQUIRED:
+                        c_human.append(fp)
+                    elif fd.risk_level == RiskLevel.AUTO_RISKY:
+                        c_risky.append(fp)
+                    else:
+                        c_safe.append(fp)
+
+                if c_safe:
+                    phases.append(
+                        PhaseFileBatch(
+                            batch_id=str(uuid4()),
+                            phase=MergePhase.AUTO_MERGE,
+                            file_paths=sorted(c_safe),
+                            risk_level=RiskLevel.AUTO_SAFE,
+                            layer_id=layer.layer_id,
+                            change_category=FileChangeCategory.C,
+                            can_parallelize=True,
+                        )
+                    )
+                if c_risky:
+                    phases.append(
+                        PhaseFileBatch(
+                            batch_id=str(uuid4()),
+                            phase=MergePhase.CONFLICT_ANALYSIS,
+                            file_paths=sorted(c_risky),
+                            risk_level=RiskLevel.AUTO_RISKY,
+                            layer_id=layer.layer_id,
+                            change_category=FileChangeCategory.C,
+                            can_parallelize=True,
+                        )
+                    )
+                if c_human:
+                    phases.append(
+                        PhaseFileBatch(
+                            batch_id=str(uuid4()),
+                            phase=MergePhase.HUMAN_REVIEW,
+                            file_paths=sorted(c_human),
+                            risk_level=RiskLevel.HUMAN_REQUIRED,
+                            layer_id=layer.layer_id,
+                            change_category=FileChangeCategory.C,
+                            can_parallelize=False,
+                        )
+                    )
+
+        cat_summary = self._build_category_summary(categories)
+        risk_summary = self._build_risk_summary(file_diffs, actionable_files)
+
+        merge_base = state.merge_base_commit
+        if not merge_base and hasattr(state, "_merge_base"):
+            merge_base = state._merge_base or ""
+
+        self.logger.info(
+            "Layered plan: %d layers, %d phases, %d actionable files (B=%d C=%d D=%d)",
+            len(layers),
+            len(phases),
+            len(actionable_files),
+            cat_summary.b_upstream_only,
+            cat_summary.c_both_changed,
+            cat_summary.d_missing,
+        )
+
+        return MergePlan(
+            created_at=datetime.now(),
+            upstream_ref=state.config.upstream_ref,
+            fork_ref=state.config.fork_ref,
+            merge_base_commit=merge_base,
+            phases=phases,
+            risk_summary=risk_summary,
+            category_summary=cat_summary,
+            layers=layers,
+            project_context_summary=state.config.project_context or "",
+            special_instructions=[],
+        )
+
+    def _resolve_layers(self, config: MergeConfig) -> list[MergeLayer]:
+        raw_layers = config.layer_config.custom_layers or DEFAULT_LAYERS
+        return [MergeLayer(**layer_data) for layer_data in raw_layers]
+
+    def _assign_files_to_layers(
+        self, file_paths: list[str], layers: list[MergeLayer]
+    ) -> dict[int, list[str]]:
+        result: dict[int, list[str]] = {}
+        assigned: set[str] = set()
+
+        sorted_layers = sorted(layers, key=lambda ly: ly.layer_id)
+
+        for layer in sorted_layers:
+            for fp in file_paths:
+                if fp in assigned:
+                    continue
+                if self._matches_layer(fp, layer.path_patterns):
+                    result.setdefault(layer.layer_id, []).append(fp)
+                    assigned.add(fp)
+
+        unassigned = [fp for fp in file_paths if fp not in assigned]
+        if unassigned:
+            max_layer = max(ly.layer_id for ly in sorted_layers) if sorted_layers else 0
+            fallback_id = max_layer + 1
+            result[fallback_id] = unassigned
+
+        return result
+
+    def _matches_layer(self, file_path: str, patterns: list[str]) -> bool:
+        for pattern in patterns:
+            if fnmatch.fnmatch(file_path, pattern):
+                return True
+            parts = file_path.split("/")
+            for i in range(len(parts)):
+                partial = "/".join(parts[: i + 1])
+                if fnmatch.fnmatch(partial, pattern.rstrip("/**")):
+                    return True
+                if fnmatch.fnmatch(partial + "/", pattern.rstrip("*")):
+                    return True
+        return False
+
+    def _build_category_summary(
+        self, categories: dict[str, FileChangeCategory]
+    ) -> CategorySummary:
+        counts: dict[FileChangeCategory, int] = {}
+        for cat in FileChangeCategory:
+            counts[cat] = 0
+        for cat in categories.values():
+            counts[cat] = counts.get(cat, 0) + 1
+        return CategorySummary(
+            total_files=len(categories),
+            a_unchanged=counts.get(FileChangeCategory.A, 0),
+            b_upstream_only=counts.get(FileChangeCategory.B, 0),
+            c_both_changed=counts.get(FileChangeCategory.C, 0),
+            d_missing=counts.get(FileChangeCategory.D_MISSING, 0),
+            d_extra=counts.get(FileChangeCategory.D_EXTRA, 0),
+            e_current_only=counts.get(FileChangeCategory.E, 0),
+        )
+
+    def _build_risk_summary(
+        self,
+        file_diffs: list[FileDiff],
+        actionable: dict[str, FileChangeCategory],
+    ) -> RiskSummary:
+        auto_safe = 0
+        auto_risky = 0
+        human_required = 0
+        deleted_only = 0
+        binary = 0
+        excluded = 0
+        top_risk: list[str] = []
+
+        diffs_map = {fd.file_path: fd for fd in file_diffs}
+
+        for fp, cat in actionable.items():
+            if cat == FileChangeCategory.B or cat == FileChangeCategory.D_MISSING:
+                auto_safe += 1
+                continue
+            fd = diffs_map.get(fp)
+            if fd is None:
+                auto_risky += 1
+                continue
+            rl = fd.risk_level
+            if rl == RiskLevel.AUTO_SAFE:
+                auto_safe += 1
+            elif rl == RiskLevel.AUTO_RISKY:
+                auto_risky += 1
+            elif rl == RiskLevel.HUMAN_REQUIRED:
+                human_required += 1
+                top_risk.append(fp)
+            elif rl == RiskLevel.DELETED_ONLY:
+                deleted_only += 1
+            elif rl == RiskLevel.BINARY:
+                binary += 1
+            else:
+                excluded += 1
+
+        total = len(actionable)
+        auto_count = auto_safe + deleted_only
+        rate = auto_count / total if total > 0 else 0.0
+
+        return RiskSummary(
+            total_files=total,
+            auto_safe_count=auto_safe,
+            auto_risky_count=auto_risky,
+            human_required_count=human_required,
+            deleted_only_count=deleted_only,
+            binary_count=binary,
+            excluded_count=excluded,
+            estimated_auto_merge_rate=round(rate, 3),
+            top_risk_files=top_risk[:10],
+        )
+
+    async def _classify_batch(
+        self,
+        file_diffs: list[FileDiff],
+        project_context: str,
+        system_prompt: str,
+        batch_index: int,
+        total_batches: int,
+    ) -> dict[str, Any]:
+        prompt = build_classification_prompt(
+            file_diffs, project_context, batch_index, total_batches
+        )
         messages = [{"role": "user", "content": prompt}]
 
         try:
             raw_response = await self._call_llm_with_retry(
-                messages, system=PLANNER_SYSTEM
+                messages, system=system_prompt
             )
-            raw_str = str(raw_response)
+            raw_str = str(raw_response).strip()
+            if raw_str.startswith("```"):
+                lines = raw_str.splitlines()
+                raw_str = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+            result: dict[str, Any] = json.loads(raw_str)
+            return result
+        except Exception as e:
+            self.logger.warning(
+                "Batch %d/%d LLM/parse failed, using fallback: %s",
+                batch_index + 1,
+                total_batches,
+                e,
+            )
+            return self._create_fallback_plan_data(file_diffs)
 
-            raw_str_clean = raw_str.strip()
-            if raw_str_clean.startswith("```"):
-                lines = raw_str_clean.splitlines()
-                raw_str_clean = "\n".join(
-                    lines[1:-1] if lines[-1] == "```" else lines[1:]
-                )
-            plan_data = json.loads(raw_str_clean)
+    def _merge_batch_plans(
+        self,
+        batch_plans: list[dict[str, Any]],
+        all_file_diffs: list[FileDiff],
+    ) -> dict[str, Any]:
+        if len(batch_plans) == 1:
+            return batch_plans[0]
 
-        except Exception:
-            plan_data = self._create_fallback_plan_data(all_file_diffs)
+        merged_phases: list[dict[str, Any]] = []
+        phase_groups: dict[str, list[str]] = {}
 
-        return self._build_merge_plan(plan_data, state, all_file_diffs)
+        for plan_data in batch_plans:
+            for phase in plan_data.get("phases", []):
+                risk_level = phase.get("risk_level", "auto_safe")
+                if risk_level not in phase_groups:
+                    phase_groups[risk_level] = []
+                phase_groups[risk_level].extend(phase.get("file_paths", []))
+
+        phase_map = {
+            "auto_safe": "auto_merge",
+            "auto_risky": "auto_merge",
+            "human_required": "human_review",
+            "deleted_only": "auto_merge",
+            "binary": "auto_merge",
+            "excluded": "auto_merge",
+        }
+
+        for risk_level, file_paths in phase_groups.items():
+            if not file_paths:
+                continue
+            merged_phases.append(
+                {
+                    "batch_id": str(uuid4()),
+                    "phase": phase_map.get(risk_level, "auto_merge"),
+                    "file_paths": file_paths,
+                    "risk_level": risk_level,
+                    "can_parallelize": risk_level != "human_required",
+                }
+            )
+
+        auto_safe = len(phase_groups.get("auto_safe", []))
+        auto_risky = len(phase_groups.get("auto_risky", []))
+        human_required = len(phase_groups.get("human_required", []))
+        deleted_only = len(phase_groups.get("deleted_only", []))
+        binary = len(phase_groups.get("binary", []))
+        excluded = len(phase_groups.get("excluded", []))
+        total = len(all_file_diffs)
+        auto_count = auto_safe + deleted_only
+        rate = auto_count / total if total > 0 else 0.0
+
+        context_summaries = [
+            p.get("project_context_summary", "")
+            for p in batch_plans
+            if p.get("project_context_summary")
+        ]
+        instructions: list[str] = []
+        for p in batch_plans:
+            instructions.extend(p.get("special_instructions", []))
+
+        top_risk: list[str] = []
+        for p in batch_plans:
+            top_risk.extend(p.get("risk_summary", {}).get("top_risk_files", []))
+
+        return {
+            "phases": merged_phases,
+            "risk_summary": {
+                "total_files": total,
+                "auto_safe_count": auto_safe,
+                "auto_risky_count": auto_risky,
+                "human_required_count": human_required,
+                "deleted_only_count": deleted_only,
+                "binary_count": binary,
+                "excluded_count": excluded,
+                "estimated_auto_merge_rate": round(rate, 3),
+                "top_risk_files": top_risk[:10],
+            },
+            "project_context_summary": context_summaries[0]
+            if context_summaries
+            else "",
+            "special_instructions": instructions,
+        }
 
     def _create_fallback_plan_data(self, file_diffs: list[FileDiff]) -> dict[str, Any]:
         phases = []
@@ -326,7 +719,7 @@ class PlannerAgent(BaseAgent):
 
     async def _enhance_risk_scores(
         self, file_diffs: list[FileDiff], config: MergeConfig
-    ) -> None:
+    ) -> list[FileDiff]:
         from src.llm.prompts.risk_scoring_prompts import (
             build_risk_scoring_prompt,
             RISK_SCORING_SYSTEM,
@@ -336,7 +729,9 @@ class PlannerAgent(BaseAgent):
         gray_high = config.llm_risk_scoring.gray_zone_high
         rule_weight = config.llm_risk_scoring.rule_weight
 
-        for i, fd in enumerate(file_diffs):
+        enhanced_diffs = list(file_diffs)
+
+        for i, fd in enumerate(enhanced_diffs):
             if not (gray_low <= fd.risk_score <= gray_high):
                 continue
 
@@ -361,11 +756,13 @@ class PlannerAgent(BaseAgent):
             except Exception:
                 continue
 
-            enhanced = rule_weight * fd.risk_score + (1.0 - rule_weight) * llm_score
-            enhanced = round(max(0.0, min(1.0, enhanced)), 3)
-            new_fd = fd.model_copy(update={"risk_score": enhanced})
+            blended = rule_weight * fd.risk_score + (1.0 - rule_weight) * llm_score
+            blended = round(max(0.0, min(1.0, blended)), 3)
+            new_fd = fd.model_copy(update={"risk_score": blended})
             new_level = classify_file(new_fd, config.file_classifier)
-            file_diffs[i] = new_fd.model_copy(update={"risk_level": new_level})
+            enhanced_diffs[i] = new_fd.model_copy(update={"risk_level": new_level})
+
+        return enhanced_diffs
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus

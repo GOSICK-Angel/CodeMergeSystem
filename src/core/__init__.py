@@ -3,7 +3,6 @@ from src.core.state_machine import StateMachine, VALID_TRANSITIONS
 from src.core.message_bus import MessageBus
 from src.core.checkpoint import Checkpoint
 from src.core.phase_runner import PhaseRunner
-from src.core.orchestrator import Orchestrator
 
 __all__ = [
     "ReadOnlyStateView",
@@ -12,5 +11,4 @@ __all__ = [
     "MessageBus",
     "Checkpoint",
     "PhaseRunner",
-    "Orchestrator",
 ]

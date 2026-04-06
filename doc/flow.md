@@ -42,8 +42,14 @@ PLANNING
   ├─[plan created successfully]─────────────→ PLAN_REVIEWING
   └─[git error / LLM error]─────────────────→ FAILED
 
-PLAN_REVIEWING                                # 新增：PlannerJudge 审查
-  ├─[APPROVED]──────────────────────────────→ AUTO_MERGING
+PLAN_REVIEWING                                # PlannerJudge 审查
+  ├─[APPROVED]──────────────────────────────→ AWAITING_HUMAN (人工审查计划)
+  │   ⚠️  计划通过 Judge 后不再直接进入执行，必须经过人类审查。
+  │      系统生成 plan_review_<run_id>.md 记录 Planner↔Judge 全部交互。
+  │      人类设置 state.plan_human_review:
+  │        approve → AUTO_MERGING
+  │        reject  → FAILED
+  │        modify  → 系统暂停，等待进一步指令
   ├─[REVISION_NEEDED, rounds < max]─────────→ PLAN_REVISING
   ├─[REVISION_NEEDED, rounds == max]────────→ AWAITING_HUMAN (人工介入计划)
   ├─[CRITICAL_REPLAN]───────────────────────→ PLANNING (完整重规划)
@@ -71,6 +77,8 @@ ANALYZING_CONFLICTS
   └─[error]─────────────────────────────────→ FAILED
 
 AWAITING_HUMAN
+  ├─[plan_human_review = approve]───────────→ AUTO_MERGING (计划审查通过)
+  ├─[plan_human_review = reject]────────────→ FAILED (计划被拒绝)
   ├─[all human decisions received]──────────→ ANALYZING_CONFLICTS (执行人工决策)
   │                                            或 JUDGE_REVIEWING (若无更多待处理)
   │  ⚠️  注意：不存在"超时默认策略"转换。人工决策必须显式完成。
@@ -117,7 +125,10 @@ flowchart TD
 
     subgraph P1_5 [Phase 1.5: 计划质量审查 PlannerJudge]
         PJ1[PlannerJudge 只读审查 MergePlan] --> PJ2{审查结论}
-        PJ2 -->|APPROVED| PJ_OK[计划通过，进入执行]
+        PJ2 -->|APPROVED| PJ_RPT[生成 plan_review 报告\n记录全部交互轮次]
+        PJ_RPT --> PJ_HUM{人类审查计划}
+        PJ_HUM -->|approve| PJ_OK[计划通过，进入执行]
+        PJ_HUM -->|reject| ABORT
         PJ2 -->|REVISION_NEEDED| PJ3{修订轮次 ≤ 2?}
         PJ3 -->|是| PJ4[Planner 按意见修订计划]
         PJ4 --> PJ1
@@ -298,10 +309,24 @@ flowchart LR
    - 不做模糊描述
 
 4. 输出 PlanJudgeVerdict，写入 MergeState（由 Orchestrator 代理）
+   - 同时将本轮交互记录（verdict_result、issues_detail、planner_revision_summary）
+     追加到 state.plan_review_log（PlanReviewRound 列表）
 
 5. Planner 收到修订意见后，只针对指出的具体文件重新分析
    - 不是完整重规划，只修订被质疑的部分
    - 修订结果再次提交 PlannerJudge 审查（最多 2 轮）
+
+6. 计划通过后（APPROVED），进入人类审查环节
+   a. 生成 plan_review_<run_id>.md，包含：
+      - 最终计划摘要（phase batches、risk summary）
+      - Planner ↔ Judge 全部交互轮次日志
+      - 人类审查区域（待填写）
+   b. 状态转为 AWAITING_HUMAN
+   c. 人类设置 state.plan_human_review（PlanHumanReview）：
+      - approve → AUTO_MERGING
+      - reject  → FAILED
+      - modify  → 系统暂停
+   d. 审查结果回写到 plan_review 报告中，供后续调试参考
 ```
 
 **轮次控制**：

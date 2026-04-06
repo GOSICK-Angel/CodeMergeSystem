@@ -40,6 +40,9 @@
   - [12. AgentMessage — Agent 间消息](#12-agentmessage--agent-间消息)
     - [Python (Pydantic v2)](#python-pydantic-v2-10)
     - [TypeScript](#typescript-11)
+  - [13. PlanReviewRound / PlanHumanReview — 计划审查交互记录](#13-planreviewround--planhumanreview--计划审查交互记录)
+    - [Python (Pydantic v2)](#python-pydantic-v2-11)
+    - [TypeScript](#typescript-12)
 
 ---
 
@@ -776,6 +779,8 @@ class MergeState(BaseModel):
 
     # PlannerJudge 输出
     plan_judge_verdict: "PlanJudgeVerdict | None" = None
+    plan_review_log: list[PlanReviewRound] = Field(default_factory=list)  # Planner↔Judge 每轮交互记录
+    plan_human_review: PlanHumanReview | None = None  # 人类对计划的审查结果
 
     # Executor 输出（含 Plan Dispute）
     file_decision_records: dict[str, FileDecisionRecord] = Field(default_factory=dict)
@@ -820,6 +825,8 @@ interface MergeState {
   phaseResults: Record<MergePhase, { status: string; startedAt?: string; completedAt?: string; error?: string }>;
   mergePlan?: MergePlan;
   fileClassifications: Record<string, RiskLevel>;
+  planReviewLog: PlanReviewRound[];
+  planHumanReview?: PlanHumanReview;
   conflictAnalyses: Record<string, ConflictAnalysis>;
   fileDecisionRecords: Record<string, FileDecisionRecord>;
   appliedPatches: string[];
@@ -1003,5 +1010,59 @@ interface AgentMessage {
   timestamp: string;
   isProcessed: boolean;
   processingError?: string;
+}
+```
+
+---
+
+## 13. PlanReviewRound / PlanHumanReview — 计划审查交互记录
+
+Planner 与 PlannerJudge 每一轮交互的完整记录，以及人类对最终计划的审查结果。用于调试 Planner 和 PlannerJudge 的行为。
+
+### Python (Pydantic v2)
+
+```python
+class PlanHumanDecision(str, Enum):
+    APPROVE = "approve"    # 批准计划，进入 AUTO_MERGING
+    REJECT = "reject"      # 拒绝计划，进入 FAILED
+    MODIFY = "modify"      # 暂停等待进一步修改指令
+
+class PlanReviewRound(BaseModel):
+    round_number: int                              # 当前轮次 (0-indexed)
+    verdict_result: PlanJudgeResult                # APPROVED / REVISION_NEEDED / CRITICAL_REPLAN
+    verdict_summary: str                           # Judge 的文字总结
+    issues_count: int                              # 本轮发现的 issue 数量
+    issues_detail: list[dict[str, str]] = Field(default_factory=list)
+        # 每项包含: file_path, reason, current (当前分类), suggested (建议分类)
+    planner_revision_summary: str | None = None    # Planner 对本轮 issues 的修订说明 (APPROVED 时为 None)
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+class PlanHumanReview(BaseModel):
+    decision: PlanHumanDecision
+    reviewer_name: str | None = None
+    reviewer_notes: str | None = None
+    decided_at: datetime = Field(default_factory=datetime.now)
+```
+
+### TypeScript
+
+```typescript
+type PlanHumanDecision = "approve" | "reject" | "modify";
+
+interface PlanReviewRound {
+  roundNumber: number;
+  verdictResult: PlanJudgeResult;
+  verdictSummary: string;
+  issuesCount: number;
+  issuesDetail: Array<{ filePath: string; reason: string; current: string; suggested: string }>;
+  plannerRevisionSummary?: string;
+  timestamp: string;
+}
+
+interface PlanHumanReview {
+  decision: PlanHumanDecision;
+  reviewerName?: string;
+  reviewerNotes?: string;
+  decidedAt: string;
 }
 ```

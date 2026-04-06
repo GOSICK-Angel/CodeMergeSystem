@@ -99,6 +99,7 @@ CodeMergeSystem/
 │   │   ├── judge.py                 # JudgeVerdict 模型
 │   │   ├── human.py                 # HumanDecisionRequest 模型
 │   │   ├── state.py                 # MergeState 全局状态
+│   │   ├── plan_review.py           # PlanReviewRound / PlanHumanReview 计划审查记录
 │   │   └── message.py               # AgentMessage 消息协议
 │   │
 │   ├── llm/                         # LLM 调用封装
@@ -251,7 +252,7 @@ class BaseAgent(ABC):
 - **`file_classifier.py`**：基于文件路径、扩展名、diff 大小、冲突密度计算风险分数。
 - **`diff_parser.py`**：将 unified diff 文本解析为结构化的 `FileDiff` 和 `ConflictPoint` 列表。
 - **`patch_applier.py`**：将 LLM 生成的合并结果转换为 git patch 并原子性应用。
-- **`report_writer.py`**：将各类数据模型序列化为 Markdown 报告或 JSON 文件。
+- **`report_writer.py`**：将各类数据模型序列化为 Markdown 报告或 JSON 文件。包括 `write_plan_review_report()` 用于输出 Planner↔Judge 全部交互记录和人类审查记录（`plan_review_<run_id>.md`）。
 
 ### 5.4 `src/models/` — 数据层
 

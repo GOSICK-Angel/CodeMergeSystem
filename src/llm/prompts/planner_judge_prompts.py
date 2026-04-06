@@ -53,8 +53,8 @@ Return JSON with:
   "issues": [
     {{
       "file_path": "path/to/file",
-      "current_classification": "auto_safe",
-      "suggested_classification": "human_required",
+      "current_classification": "<MUST be exactly one of: auto_safe, auto_risky, human_required, deleted_only, binary, excluded>",
+      "suggested_classification": "<MUST be exactly one of: auto_safe, auto_risky, human_required, deleted_only, binary, excluded>",
       "reason": "Specific reason why classification is wrong",
       "issue_type": "risk_underestimated | wrong_batch | missing_dependency | security_missed"
     }}
@@ -62,7 +62,9 @@ Return JSON with:
   "approved_files_count": 0,
   "flagged_files_count": 0,
   "summary": "Overall assessment"
-}}"""
+}}
+
+CRITICAL: Each issue MUST reference a SINGLE file_path. The "current_classification" and "suggested_classification" fields MUST be exactly one of the enum values listed above — do NOT combine multiple values or add free text."""
 
 
 def build_issue_report_prompt(issues: list[PlanIssue]) -> str:

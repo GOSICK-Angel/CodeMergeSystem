@@ -1,5 +1,6 @@
+from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
-from typing import Literal
+from typing import Any, Literal
 
 
 class AgentLLMConfig(BaseModel):
@@ -9,6 +10,7 @@ class AgentLLMConfig(BaseModel):
     max_tokens: int = Field(default=8192, ge=512, le=200000)
     max_retries: int = Field(default=3, ge=1)
     api_key_env: str = "ANTHROPIC_API_KEY"
+    api_base_url_env: str = ""
 
 
 class AgentsLLMConfig(BaseModel):
@@ -103,9 +105,11 @@ class FileClassifierConfig(BaseModel):
 
 class OutputConfig(BaseModel):
     directory: str = "./outputs"
+    debug_directory: str = "./outputs/debug"
     formats: list[Literal["json", "markdown"]] = ["json", "markdown"]
     include_raw_diffs: bool = False
-    include_llm_traces: bool = False
+    include_llm_traces: bool = True
+    language: str = "en"
 
 
 class SyntaxCheckConfig(BaseModel):
@@ -125,6 +129,44 @@ class GitHubConfig(BaseModel):
     token_env: str = "GITHUB_TOKEN"
     repo: str = ""
     pr_number: int | None = None
+
+
+class MergeLayerConfig(BaseModel):
+    enabled: bool = True
+    custom_layers: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CustomizationVerification(BaseModel):
+    type: Literal["grep", "file_exists", "function_exists"] = "grep"
+    pattern: str = ""
+    files: list[str] = Field(default_factory=list)
+
+
+class CustomizationEntry(BaseModel):
+    name: str
+    description: str = ""
+    files: list[str] = Field(default_factory=list)
+    verification: list[CustomizationVerification] = Field(default_factory=list)
+
+
+class GateCommandConfig(BaseModel):
+    name: str
+    command: str
+    working_dir: str = "."
+    timeout_seconds: int = 300
+    pass_criteria: Literal["exit_zero", "not_worse_than_baseline"] = "exit_zero"
+
+
+class GateBaseline(BaseModel):
+    gate_name: str
+    baseline_value: str = ""
+    recorded_at: datetime = Field(default_factory=datetime.now)
+
+
+class GateConfig(BaseModel):
+    enabled: bool = True
+    max_consecutive_failures: int = Field(default=3, ge=1)
+    commands: list[GateCommandConfig] = Field(default_factory=list)
 
 
 class MergeConfig(BaseModel):
@@ -153,6 +195,10 @@ class MergeConfig(BaseModel):
     syntax_check: SyntaxCheckConfig = Field(default_factory=SyntaxCheckConfig)
     llm_risk_scoring: LLMRiskScoringConfig = Field(default_factory=LLMRiskScoringConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
+    layer_config: MergeLayerConfig = Field(default_factory=MergeLayerConfig)
+    customizations: list[CustomizationEntry] = Field(default_factory=list)
+    gate: GateConfig = Field(default_factory=GateConfig)
+    max_judge_repair_rounds: int = Field(default=3, ge=1, le=10)
 
     @field_validator("upstream_ref", "fork_ref")
     @classmethod

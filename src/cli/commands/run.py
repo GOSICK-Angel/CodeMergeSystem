@@ -95,6 +95,9 @@ def run_command_impl(
 
     final_state = asyncio.run(execute())
 
+    output_dir = config.output.directory
+    debug_dir = config.output.debug_directory
+
     if ci:
         _handle_ci_exit(final_state, export_decisions)
         return
@@ -109,7 +112,22 @@ def run_command_impl(
     elif final_state.status == SystemStatus.AWAITING_HUMAN:
         console.print("[yellow]Paused: awaiting human decisions[/yellow]")
         console.print(f"  Run ID: {final_state.run_id}")
+
+        plan_review_file = Path(output_dir) / f"plan_review_{final_state.run_id}.md"
+        if plan_review_file.exists():
+            console.print(f"  [green]Plan review report: {plan_review_file}[/green]")
+            console.print("  Please review the plan before approving.")
+
         console.print(f"  Resume with: merge resume --run-id {final_state.run_id}")
+
+        log_file = Path(debug_dir) / f"run_{final_state.run_id}.log"
+        traces_file = Path(debug_dir) / f"llm_traces_{final_state.run_id}.jsonl"
+        console.print("")
+        console.print("[dim]Developer debug outputs:[/dim]")
+        if log_file.exists():
+            console.print(f"  [dim]Run log: {log_file}[/dim]")
+        if traces_file.exists():
+            console.print(f"  [dim]LLM traces: {traces_file}[/dim]")
 
         if export_decisions:
             from src.tools.decision_template import export_decision_template

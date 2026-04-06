@@ -1,8 +1,10 @@
 from datetime import datetime
 from enum import Enum
+from typing import Any
 from uuid import uuid4
 from pydantic import BaseModel, Field
-from src.models.diff import RiskLevel
+from src.models.diff import RiskLevel, FileChangeCategory
+from src.models.config import GateCommandConfig
 
 
 class MergePhase(str, Enum):
@@ -16,13 +18,190 @@ class MergePhase(str, Enum):
     REPORT = "report"
 
 
+class MergeLayer(BaseModel):
+    layer_id: int
+    name: str
+    description: str = ""
+    path_patterns: list[str] = Field(default_factory=list)
+    depends_on: list[int] = Field(default_factory=list)
+    gate_commands: list[GateCommandConfig] = Field(default_factory=list)
+
+
+def _gate(name: str, command: str, **kwargs: Any) -> dict[str, Any]:
+    return {"name": name, "command": command, **kwargs}
+
+
+DEFAULT_LAYERS: list[dict[str, Any]] = [
+    {
+        "layer_id": 0,
+        "name": "infrastructure",
+        "description": "Docker, CI/CD, dev scripts, root config files",
+        "path_patterns": [
+            "docker/**",
+            "dev/**",
+            "ci/**",
+            ".github/**",
+            "Makefile",
+            ".gitignore",
+            ".dockerignore",
+        ],
+        "depends_on": [],
+        "gate_commands": [],
+    },
+    {
+        "layer_id": 1,
+        "name": "dependencies",
+        "description": "Package manifests and lock files",
+        "path_patterns": [
+            "**/pyproject.toml",
+            "**/package.json",
+            "**/uv.lock",
+            "**/pnpm-lock.yaml",
+            "**/poetry.lock",
+            "**/requirements*.txt",
+        ],
+        "depends_on": [0],
+        "gate_commands": [],
+    },
+    {
+        "layer_id": 2,
+        "name": "types_configs",
+        "description": "Type definitions, enums, constants, configuration schemas",
+        "path_patterns": [
+            "**/types/**",
+            "**/configs/**",
+            "**/constants/**",
+            "**/enums/**",
+            "**/*.d.ts",
+        ],
+        "depends_on": [1],
+        "gate_commands": [
+            _gate("lint", "ruff check ."),
+        ],
+    },
+    {
+        "layer_id": 3,
+        "name": "models_extensions",
+        "description": "Data models, ORM, extensions, base libraries, migrations",
+        "path_patterns": [
+            "**/models/**",
+            "**/extensions/**",
+            "**/libs/**",
+            "**/migrations/**",
+        ],
+        "depends_on": [2],
+        "gate_commands": [
+            _gate("lint", "ruff check ."),
+            _gate("test", "pytest tests/ -x -q --tb=no", timeout_seconds=600),
+        ],
+    },
+    {
+        "layer_id": 4,
+        "name": "core_engine",
+        "description": "Core business logic and engine modules",
+        "path_patterns": ["**/core/**"],
+        "depends_on": [3],
+        "gate_commands": [
+            _gate("lint", "ruff check ."),
+            _gate("test", "pytest tests/ -x -q --tb=no", timeout_seconds=600),
+        ],
+    },
+    {
+        "layer_id": 5,
+        "name": "services_controllers",
+        "description": "Service layer, task queues, API controllers",
+        "path_patterns": [
+            "**/services/**",
+            "**/tasks/**",
+            "**/controllers/**",
+        ],
+        "depends_on": [4],
+        "gate_commands": [
+            _gate("lint", "ruff check ."),
+            _gate(
+                "test",
+                "pytest tests/ -x -q --tb=no",
+                timeout_seconds=600,
+                pass_criteria="not_worse_than_baseline",
+            ),
+        ],
+    },
+    {
+        "layer_id": 6,
+        "name": "frontend",
+        "description": "Frontend components and routes",
+        "path_patterns": [
+            "web/app/**",
+            "web/service/**",
+            "web/components/**",
+            "web/hooks/**",
+            "web/context/**",
+            "web/utils/**",
+            "src/app/**",
+            "src/components/**",
+        ],
+        "depends_on": [2],
+        "gate_commands": [],
+    },
+    {
+        "layer_id": 7,
+        "name": "i18n",
+        "description": "Internationalization files",
+        "path_patterns": ["**/i18n/**", "**/locales/**"],
+        "depends_on": [6],
+        "gate_commands": [],
+    },
+    {
+        "layer_id": 8,
+        "name": "tests",
+        "description": "Test files",
+        "path_patterns": [
+            "**/tests/**",
+            "**/__tests__/**",
+            "**/e2e/**",
+            "**/*.test.*",
+            "**/*.spec.*",
+        ],
+        "depends_on": [4, 5, 6],
+        "gate_commands": [
+            _gate(
+                "test_full",
+                "pytest tests/ -q --tb=no",
+                timeout_seconds=900,
+                pass_criteria="not_worse_than_baseline",
+            ),
+        ],
+    },
+    {
+        "layer_id": 9,
+        "name": "sdk_plugins",
+        "description": "SDKs, plugins, and auxiliary packages",
+        "path_patterns": ["sdks/**", "plugins/**"],
+        "depends_on": [5],
+        "gate_commands": [],
+    },
+]
+
+
 class PhaseFileBatch(BaseModel):
     batch_id: str
     phase: MergePhase
     file_paths: list[str]
     risk_level: RiskLevel
+    layer_id: int | None = None
+    change_category: FileChangeCategory | None = None
     estimated_duration_minutes: float | None = None
     can_parallelize: bool = True
+
+
+class CategorySummary(BaseModel):
+    total_files: int = 0
+    a_unchanged: int = 0
+    b_upstream_only: int = 0
+    c_both_changed: int = 0
+    d_missing: int = 0
+    d_extra: int = 0
+    e_current_only: int = 0
 
 
 class RiskSummary(BaseModel):
@@ -45,6 +224,8 @@ class MergePlan(BaseModel):
     merge_base_commit: str
     phases: list[PhaseFileBatch]
     risk_summary: RiskSummary
+    category_summary: CategorySummary | None = None
+    layers: list[MergeLayer] = Field(default_factory=list)
     project_context_summary: str
     special_instructions: list[str] = Field(default_factory=list)
-    version: str = "1.0"
+    version: str = "2.0"
