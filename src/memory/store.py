@@ -21,6 +21,12 @@ class MemoryStore:
         self._memory = memory or MergeMemory()
 
     def add_entry(self, entry: MemoryEntry) -> MemoryStore:
+        existing_hashes = {
+            e.content_hash for e in self._memory.entries if e.content_hash
+        }
+        if entry.content_hash and entry.content_hash in existing_hashes:
+            return self
+
         entries = list(self._memory.entries) + [entry]
         if len(entries) > CONSOLIDATION_THRESHOLD:
             entries = _consolidate_entries(entries)

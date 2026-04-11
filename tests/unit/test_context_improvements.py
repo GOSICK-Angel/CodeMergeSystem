@@ -203,13 +203,15 @@ class TestMemoryConsolidation:
         for i in range(CONSOLIDATION_THRESHOLD):
             store = store.add_entry(
                 _make_entry(
-                    content=f"dup {i % 3}",
+                    content=f"dup {i % 3} variant {i}",
                     tags=["same_tag"],
                     confidence=0.5 + (i % 5) * 0.05,
                 )
             )
         count_before = store.entry_count
-        store = store.add_entry(_make_entry(content="trigger", tags=["same_tag"]))
+        store = store.add_entry(
+            _make_entry(content="trigger consolidation", tags=["same_tag"])
+        )
         assert store.entry_count <= count_before
 
     def test_explicit_consolidate(self):

@@ -3,7 +3,12 @@ from __future__ import annotations
 import os
 from collections import Counter
 
-from src.memory.models import MemoryEntry, MemoryEntryType, PhaseSummary
+from src.memory.models import (
+    ConfidenceLevel,
+    MemoryEntry,
+    MemoryEntryType,
+    PhaseSummary,
+)
 from src.models.decision import FileDecisionRecord
 from src.models.state import MergeState
 
@@ -61,6 +66,7 @@ class PhaseSummarizer:
                             file_paths=[dir_path],
                             tags=["c_class", "conflict_prone", dir_path],
                             confidence=0.9,
+                            confidence_level=ConfidenceLevel.EXTRACTED,
                         )
                     )
 
@@ -118,6 +124,7 @@ class PhaseSummarizer:
                             file_paths=[dir_path],
                             tags=["merge_strategy", decision_name, dir_path],
                             confidence=min(0.95, 0.7 + ratio * 0.3),
+                            confidence_level=ConfidenceLevel.INFERRED,
                         )
                     )
 
@@ -173,6 +180,7 @@ class PhaseSummarizer:
                         file_paths=files[:5],
                         tags=["conflict_type", ctype],
                         confidence=0.85,
+                        confidence_level=ConfidenceLevel.EXTRACTED,
                     )
                 )
 
@@ -224,6 +232,7 @@ class PhaseSummarizer:
                         content=pattern_text,
                         tags=["judge_issue", issue_type],
                         confidence=0.8,
+                        confidence_level=ConfidenceLevel.HEURISTIC,
                     )
                 )
 
