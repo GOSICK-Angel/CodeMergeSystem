@@ -14,6 +14,7 @@ from src.llm.context import (
     estimate_tokens,
     get_context_window,
 )
+from src.memory.layered_loader import LayeredMemoryLoader
 from src.memory.store import MemoryStore
 from src.tools.trace_logger import TraceLogger
 
@@ -47,6 +48,16 @@ class BaseAgent(ABC):
 
     def reset_circuit_breaker(self) -> None:
         self._consecutive_failures = 0
+
+    def get_memory_context(
+        self,
+        current_phase: str,
+        file_paths: list[str] | None = None,
+    ) -> str:
+        if self._memory_store is None:
+            return ""
+        loader = LayeredMemoryLoader(self._memory_store)
+        return loader.load_for_agent(current_phase, file_paths)
 
     def _get_token_budget(self) -> TokenBudget:
         return TokenBudget(

@@ -10,6 +10,7 @@ from src.llm.context import (
     estimate_tokens,
     get_context_window,
 )
+from src.memory.layered_loader import LayeredMemoryLoader
 from src.memory.store import MemoryStore
 from src.models.config import AgentLLMConfig
 
@@ -72,7 +73,15 @@ class AgentPromptBuilder:
         available = self.budget.available - fixed_tokens
         return max(0, int(available * 3.5))
 
-    def build_memory_context_text(self, file_paths: list[str]) -> str:
+    def build_memory_context_text(
+        self,
+        file_paths: list[str],
+        current_phase: str | None = None,
+    ) -> str:
+        if current_phase is not None and self.memory_store is not None:
+            loader = LayeredMemoryLoader(self.memory_store)
+            return loader.load_for_agent(current_phase, file_paths)
+
         section = self._build_memory_section(file_paths)
         if section is None:
             return ""
