@@ -16,6 +16,7 @@ from src.models.plan_review import PlanReviewRound, PlanHumanReview
 from src.memory.models import MergeMemory
 from src.models.dispute import PlanDisputeRequest
 from src.models.conflict import ConflictAnalysis
+from src.models.dependency import FileDependencyGraph
 
 if TYPE_CHECKING:
     from src.tools.config_drift_detector import ConfigDriftReport
@@ -95,6 +96,7 @@ class MergeState(BaseModel):
     )
 
     memory: MergeMemory = Field(default_factory=MergeMemory)
+    dependency_graph: FileDependencyGraph = Field(default_factory=FileDependencyGraph)
 
     errors: list[dict[str, Any]] = Field(default_factory=list)
     messages: list[dict[str, Any]] = Field(default_factory=list)
