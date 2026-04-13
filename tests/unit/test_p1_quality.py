@@ -565,9 +565,35 @@ class TestLayerGateCommands:
 
 
 class TestRepairLoopOrchestration:
+    @staticmethod
+    def _make_ctx(config, **overrides):
+        from src.core.phases.base import PhaseContext
+        from src.core.state_machine import StateMachine
+        from src.core.message_bus import MessageBus
+        from src.core.phase_runner import PhaseRunner
+        from src.memory.store import MemoryStore
+        from src.memory.summarizer import PhaseSummarizer
+
+        defaults = dict(
+            config=config,
+            git_tool=MagicMock(),
+            gate_runner=MagicMock(),
+            state_machine=StateMachine(),
+            message_bus=MessageBus(),
+            checkpoint=MagicMock(),
+            phase_runner=PhaseRunner(),
+            memory_store=MemoryStore(),
+            summarizer=PhaseSummarizer(),
+            trace_logger=None,
+            emit=None,
+            agents={},
+        )
+        defaults.update(overrides)
+        return PhaseContext(**defaults)
+
     @pytest.mark.asyncio
     async def test_phase5_repair_loop_pass_after_repair(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+        from src.core.phases.judge_review import JudgeReviewPhase
 
         config = MergeConfig(
             upstream_ref="upstream/main",
@@ -578,89 +604,84 @@ class TestRepairLoopOrchestration:
         config.output.directory = str(tmp_path)
         config.output.debug_directory = str(tmp_path / "debug")
 
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-            patch("src.core.orchestrator.GateRunner"),
-        ):
-            orch = Orchestrator(config)
+        fail_verdict = JudgeVerdict(
+            verdict=VerdictType.FAIL,
+            reviewed_files_count=1,
+            passed_files=[],
+            failed_files=["a.py"],
+            conditional_files=[],
+            issues=[
+                JudgeIssue(
+                    file_path="a.py",
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="syntax_error",
+                    description="syntax error",
+                    must_fix_before_merge=True,
+                    suggested_fix="fix it",
+                )
+            ],
+            critical_issues_count=1,
+            high_issues_count=0,
+            overall_confidence=0.3,
+            summary="fail",
+            blocking_issues=[],
+            timestamp=datetime.now(),
+            judge_model="test",
+        )
 
-            fail_verdict = JudgeVerdict(
-                verdict=VerdictType.FAIL,
-                reviewed_files_count=1,
-                passed_files=[],
-                failed_files=["a.py"],
-                conditional_files=[],
-                issues=[
-                    JudgeIssue(
-                        file_path="a.py",
-                        issue_level=IssueSeverity.CRITICAL,
-                        issue_type="syntax_error",
-                        description="syntax error",
-                        must_fix_before_merge=True,
-                        suggested_fix="fix it",
-                    )
-                ],
-                critical_issues_count=1,
-                high_issues_count=0,
-                overall_confidence=0.3,
-                summary="fail",
-                blocking_issues=[],
-                timestamp=datetime.now(),
-                judge_model="test",
-            )
+        pass_verdict = JudgeVerdict(
+            verdict=VerdictType.PASS,
+            reviewed_files_count=1,
+            passed_files=["a.py"],
+            failed_files=[],
+            conditional_files=[],
+            issues=[],
+            critical_issues_count=0,
+            high_issues_count=0,
+            overall_confidence=0.95,
+            summary="pass after repair",
+            blocking_issues=[],
+            timestamp=datetime.now(),
+            judge_model="test",
+        )
 
-            pass_verdict = JudgeVerdict(
-                verdict=VerdictType.PASS,
-                reviewed_files_count=1,
-                passed_files=["a.py"],
-                failed_files=[],
-                conditional_files=[],
-                issues=[],
-                critical_issues_count=0,
-                high_issues_count=0,
-                overall_confidence=0.95,
-                summary="pass after repair",
-                blocking_issues=[],
-                timestamp=datetime.now(),
-                judge_model="test",
-            )
+        fail_msg = MagicMock()
+        fail_msg.payload = {"verdict": fail_verdict.model_dump(mode="json")}
+        pass_msg = MagicMock()
+        pass_msg.payload = {"verdict": pass_verdict.model_dump(mode="json")}
 
-            fail_msg = MagicMock()
-            fail_msg.payload = {"verdict": fail_verdict.model_dump(mode="json")}
-            pass_msg = MagicMock()
-            pass_msg.payload = {"verdict": pass_verdict.model_dump(mode="json")}
+        mock_judge = MagicMock()
+        mock_judge.run = AsyncMock(side_effect=[fail_msg, pass_msg])
+        mock_judge.verify_customizations = MagicMock(return_value=[])
+        mock_judge.build_repair_instructions = MagicMock(
+            return_value=[
+                RepairInstruction(
+                    file_path="a.py",
+                    instruction="fix syntax",
+                    is_repairable=True,
+                )
+            ]
+        )
+        mock_executor = MagicMock()
+        mock_executor.repair = AsyncMock(return_value=[])
 
-            orch.judge.run = AsyncMock(side_effect=[fail_msg, pass_msg])
-            orch.judge.verify_customizations = MagicMock(return_value=[])
-            orch.judge.build_repair_instructions = MagicMock(
-                return_value=[
-                    RepairInstruction(
-                        file_path="a.py",
-                        instruction="fix syntax",
-                        is_repairable=True,
-                    )
-                ]
-            )
-            orch.executor.repair = AsyncMock(return_value=[])
+        ctx = self._make_ctx(
+            config, agents={"judge": mock_judge, "executor": mock_executor}
+        )
 
-            state = MergeState(config=config)
-            state.status = SystemStatus.JUDGE_REVIEWING
-            await orch._run_phase5(state)
+        state = MergeState(config=config)
+        state.status = SystemStatus.JUDGE_REVIEWING
+        phase = JudgeReviewPhase()
+        await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.GENERATING_REPORT
         assert state.judge_repair_rounds == 1
         assert len(state.judge_verdicts_log) == 2
-        orch.executor.repair.assert_called_once()
+        mock_executor.repair.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_phase5_veto_escalates_to_human(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+        from src.core.phases.judge_review import JudgeReviewPhase
 
         config = MergeConfig(
             upstream_ref="upstream/main",
@@ -681,50 +702,45 @@ class TestRepairLoopOrchestration:
         config.output.directory = str(tmp_path)
         config.output.debug_directory = str(tmp_path / "debug")
 
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-            patch("src.core.orchestrator.GateRunner"),
-        ):
-            orch = Orchestrator(config)
+        pass_verdict = JudgeVerdict(
+            verdict=VerdictType.PASS,
+            reviewed_files_count=1,
+            passed_files=["a.py"],
+            failed_files=[],
+            conditional_files=[],
+            issues=[],
+            critical_issues_count=0,
+            high_issues_count=0,
+            overall_confidence=0.95,
+            summary="pass",
+            blocking_issues=[],
+            timestamp=datetime.now(),
+            judge_model="test",
+        )
+        msg = MagicMock()
+        msg.payload = {"verdict": pass_verdict.model_dump(mode="json")}
 
-            pass_verdict = JudgeVerdict(
-                verdict=VerdictType.PASS,
-                reviewed_files_count=1,
-                passed_files=["a.py"],
-                failed_files=[],
-                conditional_files=[],
-                issues=[],
-                critical_issues_count=0,
-                high_issues_count=0,
-                overall_confidence=0.95,
-                summary="pass",
-                blocking_issues=[],
-                timestamp=datetime.now(),
-                judge_model="test",
-            )
-            msg = MagicMock()
-            msg.payload = {"verdict": pass_verdict.model_dump(mode="json")}
-            orch.judge.run = AsyncMock(return_value=msg)
+        mock_judge = MagicMock()
+        mock_judge.run = AsyncMock(return_value=msg)
 
-            violation = CustomizationViolation(
-                customization_name="Missing Feature",
-                verification_type="file_exists",
-                expected_pattern="nonexistent.py",
-                checked_files=["nonexistent.py"],
-                match_count=0,
-            )
-            orch.judge.verify_customizations = MagicMock(return_value=[violation])
-            orch.judge.build_repair_instructions = MagicMock(return_value=[])
+        violation = CustomizationViolation(
+            customization_name="Missing Feature",
+            verification_type="file_exists",
+            expected_pattern="nonexistent.py",
+            checked_files=["nonexistent.py"],
+            match_count=0,
+        )
+        mock_judge.verify_customizations = MagicMock(return_value=[violation])
+        mock_judge.build_repair_instructions = MagicMock(return_value=[])
 
-            state = MergeState(config=config)
-            state.status = SystemStatus.JUDGE_REVIEWING
-            await orch._run_phase5(state)
+        ctx = self._make_ctx(
+            config, agents={"judge": mock_judge, "executor": MagicMock()}
+        )
+
+        state = MergeState(config=config)
+        state.status = SystemStatus.JUDGE_REVIEWING
+        phase = JudgeReviewPhase()
+        await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.AWAITING_HUMAN
         assert state.judge_verdict is not None

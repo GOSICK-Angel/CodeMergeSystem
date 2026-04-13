@@ -9,7 +9,6 @@ from src.models.diff import (
     FileDiff,
     FileChangeCategory,
     FileStatus,
-    RiskLevel,
 )
 from src.models.state import MergeState, SystemStatus
 from src.tools.diff_parser import build_file_diff, detect_language

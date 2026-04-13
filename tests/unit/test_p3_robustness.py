@@ -527,7 +527,8 @@ class TestOrchestratorP3Integration:
             return Orchestrator(config)
 
     def test_orchestrator_imports_p3_tools(self):
-        from src.core.orchestrator import PollutionAuditor, ConfigDriftDetector
+        from src.tools.pollution_auditor import PollutionAuditor
+        from src.tools.config_drift_detector import ConfigDriftDetector
 
         assert PollutionAuditor is not None
         assert ConfigDriftDetector is not None

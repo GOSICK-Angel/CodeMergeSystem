@@ -629,14 +629,7 @@ class TestVerifyLayerDepsBlocking:
         return state
 
     def test_deps_met_returns_true(self):
-        from src.core.orchestrator import Orchestrator
-        from src.models.config import MergeConfig
-
-        orch = Orchestrator.__new__(Orchestrator)
-        orch.config = MergeConfig(
-            upstream_ref="upstream/main",
-            fork_ref="feature/fork",
-        )
+        from src.core.phases._gate_helpers import verify_layer_deps
 
         layers = [
             MergeLayer(layer_id=0, name="base"),
@@ -645,17 +638,10 @@ class TestVerifyLayerDepsBlocking:
         state = self._make_state_with_layers(layers)
         completed = {0}
 
-        assert orch._verify_layer_deps(1, completed, state) is True
+        assert verify_layer_deps(1, completed, state) is True
 
     def test_deps_not_met_returns_false(self):
-        from src.core.orchestrator import Orchestrator
-        from src.models.config import MergeConfig
-
-        orch = Orchestrator.__new__(Orchestrator)
-        orch.config = MergeConfig(
-            upstream_ref="upstream/main",
-            fork_ref="feature/fork",
-        )
+        from src.core.phases._gate_helpers import verify_layer_deps
 
         layers = [
             MergeLayer(layer_id=0, name="base"),
@@ -664,31 +650,17 @@ class TestVerifyLayerDepsBlocking:
         state = self._make_state_with_layers(layers)
         completed: set[int] = set()
 
-        assert orch._verify_layer_deps(1, completed, state) is False
+        assert verify_layer_deps(1, completed, state) is False
 
     def test_no_layers_returns_true(self):
-        from src.core.orchestrator import Orchestrator
-        from src.models.config import MergeConfig
-
-        orch = Orchestrator.__new__(Orchestrator)
-        orch.config = MergeConfig(
-            upstream_ref="upstream/main",
-            fork_ref="feature/fork",
-        )
+        from src.core.phases._gate_helpers import verify_layer_deps
 
         state = self._make_state_with_layers([])
-        assert orch._verify_layer_deps(0, set(), state) is True
+        assert verify_layer_deps(0, set(), state) is True
 
     def test_unknown_layer_returns_true(self):
-        from src.core.orchestrator import Orchestrator
-        from src.models.config import MergeConfig
-
-        orch = Orchestrator.__new__(Orchestrator)
-        orch.config = MergeConfig(
-            upstream_ref="upstream/main",
-            fork_ref="feature/fork",
-        )
+        from src.core.phases._gate_helpers import verify_layer_deps
 
         layers = [MergeLayer(layer_id=0, name="base")]
         state = self._make_state_with_layers(layers)
-        assert orch._verify_layer_deps(99, set(), state) is True
+        assert verify_layer_deps(99, set(), state) is True

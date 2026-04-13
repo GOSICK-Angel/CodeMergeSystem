@@ -817,22 +817,40 @@ class TestParseFileStatus:
         assert _parse_file_status("a") == FileStatus.ADDED
 
 
-class TestOrchestratorWithMocks:
-    def _build_orchestrator(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+class TestPhaseClasses:
+    """Tests for the extracted Phase classes.
 
-        config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-        return orch, config
+    After the A3 refactor the Orchestrator delegates to Phase classes.
+    Each test creates a lightweight PhaseContext with mocked agents and
+    invokes the Phase directly — no need to construct a full Orchestrator.
+    """
+
+    @staticmethod
+    def _make_ctx(config, **overrides):
+        from src.core.phases.base import PhaseContext
+        from src.core.state_machine import StateMachine
+        from src.core.message_bus import MessageBus
+        from src.core.checkpoint import Checkpoint
+        from src.core.phase_runner import PhaseRunner
+        from src.memory.store import MemoryStore
+        from src.memory.summarizer import PhaseSummarizer
+
+        defaults = dict(
+            config=config,
+            git_tool=MagicMock(),
+            gate_runner=MagicMock(),
+            state_machine=StateMachine(),
+            message_bus=MessageBus(),
+            checkpoint=MagicMock(),
+            phase_runner=PhaseRunner(),
+            memory_store=MemoryStore(),
+            summarizer=PhaseSummarizer(),
+            trace_logger=None,
+            emit=None,
+            agents={},
+        )
+        defaults.update(overrides)
+        return PhaseContext(**defaults)
 
     async def test_run_initialize_then_planning(self, tmp_path):
         from src.core.orchestrator import Orchestrator
@@ -869,8 +887,8 @@ class TestOrchestratorWithMocks:
             orch.judge.run = AsyncMock(return_value=judge_msg)
 
             with (
-                patch("src.core.orchestrator.write_json_report"),
-                patch("src.core.orchestrator.write_markdown_report"),
+                patch("src.core.phases.report_generation.write_json_report"),
+                patch("src.core.phases.report_generation.write_markdown_report"),
             ):
                 state = _make_state(config)
                 state.merge_plan = _make_merge_plan()
@@ -884,136 +902,109 @@ class TestOrchestratorWithMocks:
         )
 
     async def test_initialize_sets_file_diffs(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+        from src.core.phases.initialize import InitializePhase
 
         config = _make_config(str(tmp_path))
+        mock_git = MagicMock()
+        mock_git.get_merge_base.return_value = "abc123"
+        mock_git.get_changed_files.return_value = [("M", "src/foo.py")]
+        mock_git.get_unified_diff.return_value = "+line\n"
+
+        ctx = self._make_ctx(config, git_tool=mock_git)
+
         with (
-            patch("src.core.orchestrator.GitTool") as MockGit,
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
+            patch("src.core.phases.initialize.build_file_diff") as mock_build,
+            patch("src.core.phases.initialize.detect_language", return_value="python"),
+            patch(
+                "src.core.phases.initialize.is_security_sensitive", return_value=False
+            ),
+            patch("src.core.phases.initialize.compute_risk_score", return_value=0.1),
+            patch(
+                "src.core.phases.initialize.classify_file",
+                return_value=RiskLevel.AUTO_SAFE,
+            ),
+            patch(
+                "src.core.phases.initialize.classify_all_files",
+                return_value={"src/foo.py": FileChangeCategory.C},
+            ),
+            patch(
+                "src.core.phases.initialize.category_summary",
+                return_value={
+                    "unchanged": 0,
+                    "upstream_only": 0,
+                    "both_changed": 1,
+                    "upstream_new": 0,
+                    "current_only_file": 0,
+                    "current_only_change": 0,
+                },
+            ),
         ):
-            mock_git = MockGit.return_value
-            mock_git.get_merge_base.return_value = "abc123"
-            mock_git.get_changed_files.return_value = [("M", "src/foo.py")]
-            mock_git.get_unified_diff.return_value = "+line\n"
+            mock_fd = _make_file_diff()
+            mock_build.return_value = mock_fd
 
-            with (
-                patch("src.core.orchestrator.build_file_diff") as mock_build,
-                patch("src.core.orchestrator.detect_language", return_value="python"),
-                patch(
-                    "src.core.orchestrator.is_security_sensitive", return_value=False
-                ),
-                patch("src.core.orchestrator.compute_risk_score", return_value=0.1),
-                patch(
-                    "src.core.orchestrator.classify_file",
-                    return_value=RiskLevel.AUTO_SAFE,
-                ),
-                patch(
-                    "src.core.orchestrator.classify_all_files",
-                    return_value={"src/foo.py": FileChangeCategory.C},
-                ),
-                patch(
-                    "src.core.orchestrator.category_summary",
-                    return_value={
-                        "unchanged": 0,
-                        "upstream_only": 0,
-                        "both_changed": 1,
-                        "upstream_new": 0,
-                        "current_only_file": 0,
-                        "current_only_change": 0,
-                    },
-                ),
-            ):
-                mock_fd = _make_file_diff()
-                mock_build.return_value = mock_fd
-
-                orch = Orchestrator(config)
-                state = _make_state(config)
-                await orch._initialize(state)
+            state = _make_state(config)
+            phase = InitializePhase()
+            await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.PLANNING
         assert len(getattr(state, "_file_diffs", [])) == 1
         assert state.file_categories == {"src/foo.py": FileChangeCategory.C}
 
-    async def test_run_phase1_transitions_to_plan_reviewing(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+    async def test_planning_transitions_to_plan_reviewing(self, tmp_path):
+        from src.core.phases.planning import PlanningPhase
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-            orch.planner.run = AsyncMock()
+        mock_planner = MagicMock()
+        mock_planner.run = AsyncMock()
+        ctx = self._make_ctx(config, agents={"planner": mock_planner})
 
-            state = _make_state(config)
-            state.status = SystemStatus.PLANNING
-            await orch._run_phase1(state)
+        state = _make_state(config)
+        state.status = SystemStatus.PLANNING
+        phase = PlanningPhase()
+        await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.PLAN_REVIEWING
 
-    async def test_run_phase1_failure_marks_failed_phase(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
-        from src.models.plan import MergePhase
+    async def test_planning_failure_marks_failed_phase(self, tmp_path):
+        from src.core.phases.planning import PlanningPhase
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-            orch.planner.run = AsyncMock(side_effect=RuntimeError("planner failed"))
+        mock_planner = MagicMock()
+        mock_planner.run = AsyncMock(side_effect=RuntimeError("planner failed"))
+        ctx = self._make_ctx(config, agents={"planner": mock_planner})
 
-            state = _make_state(config)
-            state.status = SystemStatus.PLANNING
-            with pytest.raises(RuntimeError):
-                await orch._run_phase1(state)
+        state = _make_state(config)
+        state.status = SystemStatus.PLANNING
+        phase = PlanningPhase()
+        with pytest.raises(RuntimeError):
+            await phase.execute(state, ctx)
 
         assert state.phase_results[MergePhase.ANALYSIS.value].status == "failed"
 
-    async def test_run_phase1_5_approved_transitions_to_auto_merging(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+    async def test_plan_review_approved_transitions_to_awaiting_human(self, tmp_path):
+        from src.core.phases.plan_review import PlanReviewPhase
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-            orch.planner_judge.review_plan = AsyncMock(
-                return_value=_make_plan_judge_verdict(PlanJudgeResult.APPROVED)
-            )
+        mock_pj = MagicMock()
+        mock_pj.review_plan = AsyncMock(
+            return_value=_make_plan_judge_verdict(PlanJudgeResult.APPROVED)
+        )
+        ctx = self._make_ctx(
+            config, agents={"planner": MagicMock(), "planner_judge": mock_pj}
+        )
 
-            state = _make_state(config)
-            state.status = SystemStatus.PLAN_REVIEWING
-            state.merge_plan = _make_merge_plan()
-            await orch._run_phase1_5(state)
+        state = _make_state(config)
+        state.status = SystemStatus.PLAN_REVIEWING
+        state.merge_plan = _make_merge_plan()
+        phase = PlanReviewPhase()
+        await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.AWAITING_HUMAN
         assert len(state.plan_review_log) == 1
         assert state.plan_review_log[0].verdict_result == PlanJudgeResult.APPROVED
 
-    async def test_run_phase1_5_exceeds_max_rounds_proceeds(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+    async def test_plan_review_exceeds_max_rounds_proceeds(self, tmp_path):
+        from src.core.phases.plan_review import PlanReviewPhase
         from src.models.config import OutputConfig
 
         config = MergeConfig(
@@ -1022,338 +1013,273 @@ class TestOrchestratorWithMocks:
             max_plan_revision_rounds=1,
             output=OutputConfig(directory=str(tmp_path)),
         )
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-            orch.planner_judge.review_plan = AsyncMock(
-                return_value=_make_plan_judge_verdict(PlanJudgeResult.REVISION_NEEDED)
-            )
-            orch.planner.revise_plan = AsyncMock(return_value=_make_merge_plan())
+        mock_pj = MagicMock()
+        mock_pj.review_plan = AsyncMock(
+            return_value=_make_plan_judge_verdict(PlanJudgeResult.REVISION_NEEDED)
+        )
+        mock_planner = MagicMock()
+        mock_planner.revise_plan = AsyncMock(return_value=_make_merge_plan())
+        ctx = self._make_ctx(
+            config, agents={"planner": mock_planner, "planner_judge": mock_pj}
+        )
 
-            state = _make_state(config)
-            state.status = SystemStatus.PLAN_REVIEWING
-            state.merge_plan = _make_merge_plan()
-            await orch._run_phase1_5(state)
+        state = _make_state(config)
+        state.status = SystemStatus.PLAN_REVIEWING
+        state.merge_plan = _make_merge_plan()
+        phase = PlanReviewPhase()
+        await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.AWAITING_HUMAN
 
-    async def test_run_phase2_no_risky_skips_to_judge(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+    async def test_auto_merge_no_risky_skips_to_judge(self, tmp_path):
+        from src.core.phases.auto_merge import AutoMergePhase
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-            orch.executor.execute_auto_merge = AsyncMock(
-                return_value=MagicMock(file_path="src/foo.py")
-            )
+        mock_executor = MagicMock()
+        mock_executor.execute_auto_merge = AsyncMock(
+            return_value=MagicMock(file_path="src/foo.py")
+        )
+        ctx = self._make_ctx(config, agents={"executor": mock_executor})
 
-            state = _make_state(config)
-            state.status = SystemStatus.AUTO_MERGING
-            state.merge_plan = _make_merge_plan(auto_safe_files=["src/foo.py"])
-            object.__setattr__(state, "_file_diffs", [_make_file_diff("src/foo.py")])
-            await orch._run_phase2(state)
+        state = _make_state(config)
+        state.status = SystemStatus.AUTO_MERGING
+        state.merge_plan = _make_merge_plan(auto_safe_files=["src/foo.py"])
+        object.__setattr__(state, "_file_diffs", [_make_file_diff("src/foo.py")])
+        phase = AutoMergePhase()
+        await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.JUDGE_REVIEWING
 
-    async def test_run_phase2_no_plan_raises(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+    async def test_auto_merge_no_plan_raises(self, tmp_path):
+        from src.core.phases.auto_merge import AutoMergePhase
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-            state = _make_state(config)
-            state.status = SystemStatus.AUTO_MERGING
-            with pytest.raises(ValueError, match="No merge plan"):
-                await orch._run_phase2(state)
+        ctx = self._make_ctx(config, agents={"executor": MagicMock()})
 
-    async def test_run_phase3_no_human_needed_transitions_to_judge(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+        state = _make_state(config)
+        state.status = SystemStatus.AUTO_MERGING
+        phase = AutoMergePhase()
+        with pytest.raises(ValueError, match="No merge plan"):
+            await phase.execute(state, ctx)
+
+    async def test_conflict_analysis_no_human_transitions_to_judge(self, tmp_path):
+        from src.core.phases.conflict_analysis import ConflictAnalysisPhase
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-            orch.conflict_analyst.run = AsyncMock()
-            orch.executor.execute_semantic_merge = AsyncMock(
-                return_value=MagicMock(file_path="src/foo.py")
-            )
+        mock_analyst = MagicMock()
+        mock_analyst.run = AsyncMock()
+        mock_executor = MagicMock()
+        mock_executor.execute_semantic_merge = AsyncMock(
+            return_value=MagicMock(file_path="src/foo.py")
+        )
+        ctx = self._make_ctx(
+            config,
+            agents={"conflict_analyst": mock_analyst, "executor": mock_executor},
+        )
 
-            state = _make_state(config)
-            state.status = SystemStatus.ANALYZING_CONFLICTS
-            fd = _make_file_diff("src/foo.py")
-            object.__setattr__(state, "_file_diffs", [fd])
-            state.conflict_analyses["src/foo.py"] = _make_conflict_analysis(
-                confidence=0.95, can_coexist=True
-            )
-            await orch._run_phase3(state)
+        state = _make_state(config)
+        state.status = SystemStatus.ANALYZING_CONFLICTS
+        fd = _make_file_diff("src/foo.py")
+        object.__setattr__(state, "_file_diffs", [fd])
+        state.conflict_analyses["src/foo.py"] = _make_conflict_analysis(
+            confidence=0.95, can_coexist=True
+        )
+        phase = ConflictAnalysisPhase()
+        await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.JUDGE_REVIEWING
 
-    async def test_run_phase3_human_needed_transitions_to_awaiting_human(
+    async def test_conflict_analysis_human_needed_transitions_to_awaiting_human(
         self, tmp_path
     ):
-        from src.core.orchestrator import Orchestrator
+        from src.core.phases.conflict_analysis import ConflictAnalysisPhase
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-            orch.conflict_analyst.run = AsyncMock()
+        mock_analyst = MagicMock()
+        mock_analyst.run = AsyncMock()
+        ctx = self._make_ctx(
+            config,
+            agents={"conflict_analyst": mock_analyst, "executor": MagicMock()},
+        )
 
-            state = _make_state(config)
-            state.status = SystemStatus.ANALYZING_CONFLICTS
-            fd = _make_file_diff("src/foo.py")
-            object.__setattr__(state, "_file_diffs", [fd])
-            state.conflict_analyses["src/foo.py"] = _make_conflict_analysis(
-                confidence=0.1,
-            )
-            await orch._run_phase3(state)
+        state = _make_state(config)
+        state.status = SystemStatus.ANALYZING_CONFLICTS
+        fd = _make_file_diff("src/foo.py")
+        object.__setattr__(state, "_file_diffs", [fd])
+        state.conflict_analyses["src/foo.py"] = _make_conflict_analysis(
+            confidence=0.1,
+        )
+        phase = ConflictAnalysisPhase()
+        await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.AWAITING_HUMAN
 
-    async def test_run_phase5_pass_verdict_transitions_to_generating_report(
-        self, tmp_path
-    ):
-        from src.core.orchestrator import Orchestrator
+    async def test_judge_pass_verdict_transitions_to_generating_report(self, tmp_path):
+        from src.core.phases.judge_review import JudgeReviewPhase
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-            judge_verdict = JudgeVerdict(
-                verdict=VerdictType.PASS,
-                reviewed_files_count=1,
-                passed_files=["src/foo.py"],
-                failed_files=[],
-                conditional_files=[],
-                issues=[],
-                critical_issues_count=0,
-                high_issues_count=0,
-                overall_confidence=0.95,
-                summary="all good",
-                blocking_issues=[],
-                timestamp=datetime.now(),
-                judge_model="claude-opus-4-6",
-            )
-            msg = MagicMock()
-            msg.payload = {"verdict": judge_verdict.model_dump()}
-            orch.judge.run = AsyncMock(return_value=msg)
-            orch.judge.verify_customizations = MagicMock(return_value=[])
-            orch.judge.build_repair_instructions = MagicMock(return_value=[])
+        judge_verdict = JudgeVerdict(
+            verdict=VerdictType.PASS,
+            reviewed_files_count=1,
+            passed_files=["src/foo.py"],
+            failed_files=[],
+            conditional_files=[],
+            issues=[],
+            critical_issues_count=0,
+            high_issues_count=0,
+            overall_confidence=0.95,
+            summary="all good",
+            blocking_issues=[],
+            timestamp=datetime.now(),
+            judge_model="claude-opus-4-6",
+        )
+        msg = MagicMock()
+        msg.payload = {"verdict": judge_verdict.model_dump()}
+        mock_judge = MagicMock()
+        mock_judge.run = AsyncMock(return_value=msg)
+        mock_judge.verify_customizations = MagicMock(return_value=[])
+        mock_judge.build_repair_instructions = MagicMock(return_value=[])
+        ctx = self._make_ctx(
+            config, agents={"judge": mock_judge, "executor": MagicMock()}
+        )
 
-            state = _make_state(config)
-            state.status = SystemStatus.JUDGE_REVIEWING
-            await orch._run_phase5(state)
+        state = _make_state(config)
+        state.status = SystemStatus.JUDGE_REVIEWING
+        phase = JudgeReviewPhase()
+        await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.GENERATING_REPORT
 
-    async def test_run_phase5_fail_verdict_transitions_to_failed(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+    async def test_judge_fail_verdict_transitions_to_awaiting_human(self, tmp_path):
+        from src.core.phases.judge_review import JudgeReviewPhase
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-            judge_verdict = JudgeVerdict(
-                verdict=VerdictType.FAIL,
-                reviewed_files_count=1,
-                passed_files=[],
-                failed_files=["src/foo.py"],
-                conditional_files=[],
-                issues=[],
-                critical_issues_count=1,
-                high_issues_count=0,
-                overall_confidence=0.2,
-                summary="fail",
-                blocking_issues=["critical issue"],
-                timestamp=datetime.now(),
-                judge_model="claude-opus-4-6",
-            )
-            msg = MagicMock()
-            msg.payload = {"verdict": judge_verdict.model_dump()}
-            orch.judge.run = AsyncMock(return_value=msg)
-            orch.judge.verify_customizations = MagicMock(return_value=[])
-            orch.judge.build_repair_instructions = MagicMock(return_value=[])
+        judge_verdict = JudgeVerdict(
+            verdict=VerdictType.FAIL,
+            reviewed_files_count=1,
+            passed_files=[],
+            failed_files=["src/foo.py"],
+            conditional_files=[],
+            issues=[],
+            critical_issues_count=1,
+            high_issues_count=0,
+            overall_confidence=0.2,
+            summary="fail",
+            blocking_issues=["critical issue"],
+            timestamp=datetime.now(),
+            judge_model="claude-opus-4-6",
+        )
+        msg = MagicMock()
+        msg.payload = {"verdict": judge_verdict.model_dump()}
+        mock_judge = MagicMock()
+        mock_judge.run = AsyncMock(return_value=msg)
+        mock_judge.verify_customizations = MagicMock(return_value=[])
+        mock_judge.build_repair_instructions = MagicMock(return_value=[])
+        ctx = self._make_ctx(
+            config, agents={"judge": mock_judge, "executor": MagicMock()}
+        )
 
-            state = _make_state(config)
-            state.status = SystemStatus.JUDGE_REVIEWING
-            await orch._run_phase5(state)
+        state = _make_state(config)
+        state.status = SystemStatus.JUDGE_REVIEWING
+        phase = JudgeReviewPhase()
+        await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.AWAITING_HUMAN
 
-    async def test_run_phase5_conditional_verdict_awaiting_human(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+    async def test_judge_conditional_verdict_awaiting_human(self, tmp_path):
+        from src.core.phases.judge_review import JudgeReviewPhase
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-            judge_verdict = JudgeVerdict(
-                verdict=VerdictType.CONDITIONAL,
-                reviewed_files_count=1,
-                passed_files=[],
-                failed_files=[],
-                conditional_files=["src/foo.py"],
-                issues=[],
-                critical_issues_count=0,
-                high_issues_count=0,
-                overall_confidence=0.7,
-                summary="conditional",
-                blocking_issues=[],
-                timestamp=datetime.now(),
-                judge_model="claude-opus-4-6",
-            )
-            msg = MagicMock()
-            msg.payload = {"verdict": judge_verdict.model_dump()}
-            orch.judge.run = AsyncMock(return_value=msg)
-            orch.judge.verify_customizations = MagicMock(return_value=[])
-            orch.judge.build_repair_instructions = MagicMock(return_value=[])
+        judge_verdict = JudgeVerdict(
+            verdict=VerdictType.CONDITIONAL,
+            reviewed_files_count=1,
+            passed_files=[],
+            failed_files=[],
+            conditional_files=["src/foo.py"],
+            issues=[],
+            critical_issues_count=0,
+            high_issues_count=0,
+            overall_confidence=0.7,
+            summary="conditional",
+            blocking_issues=[],
+            timestamp=datetime.now(),
+            judge_model="claude-opus-4-6",
+        )
+        msg = MagicMock()
+        msg.payload = {"verdict": judge_verdict.model_dump()}
+        mock_judge = MagicMock()
+        mock_judge.run = AsyncMock(return_value=msg)
+        mock_judge.verify_customizations = MagicMock(return_value=[])
+        mock_judge.build_repair_instructions = MagicMock(return_value=[])
+        ctx = self._make_ctx(
+            config, agents={"judge": mock_judge, "executor": MagicMock()}
+        )
 
-            state = _make_state(config)
-            state.status = SystemStatus.JUDGE_REVIEWING
-            await orch._run_phase5(state)
+        state = _make_state(config)
+        state.status = SystemStatus.JUDGE_REVIEWING
+        phase = JudgeReviewPhase()
+        await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.AWAITING_HUMAN
 
-    async def test_run_phase5_no_verdict_transitions_to_generating_report(
-        self, tmp_path
-    ):
-        from src.core.orchestrator import Orchestrator
+    async def test_judge_no_verdict_transitions_to_generating_report(self, tmp_path):
+        from src.core.phases.judge_review import JudgeReviewPhase
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-            msg = MagicMock()
-            msg.payload = {}
-            orch.judge.run = AsyncMock(return_value=msg)
-            orch.judge.verify_customizations = MagicMock(return_value=[])
-            orch.judge.build_repair_instructions = MagicMock(return_value=[])
+        msg = MagicMock()
+        msg.payload = {}
+        mock_judge = MagicMock()
+        mock_judge.run = AsyncMock(return_value=msg)
+        mock_judge.verify_customizations = MagicMock(return_value=[])
+        mock_judge.build_repair_instructions = MagicMock(return_value=[])
+        ctx = self._make_ctx(
+            config, agents={"judge": mock_judge, "executor": MagicMock()}
+        )
 
-            state = _make_state(config)
-            state.status = SystemStatus.JUDGE_REVIEWING
-            await orch._run_phase5(state)
+        state = _make_state(config)
+        state.status = SystemStatus.JUDGE_REVIEWING
+        phase = JudgeReviewPhase()
+        await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.GENERATING_REPORT
 
-    async def test_run_phase6_writes_reports_and_transitions_completed(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+    async def test_report_writes_and_transitions_completed(self, tmp_path):
+        from src.core.phases.report_generation import ReportGenerationPhase
 
         config = _make_config(str(tmp_path))
+        ctx = self._make_ctx(config)
+
         with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
+            patch("src.core.phases.report_generation.write_json_report") as mock_json,
+            patch("src.core.phases.report_generation.write_markdown_report") as mock_md,
         ):
-            orch = Orchestrator(config)
+            state = _make_state(config)
+            state.status = SystemStatus.GENERATING_REPORT
+            phase = ReportGenerationPhase()
+            await phase.execute(state, ctx)
 
-            with (
-                patch("src.core.orchestrator.write_json_report") as mock_json,
-                patch("src.core.orchestrator.write_markdown_report") as mock_md,
-            ):
-                state = _make_state(config)
-                state.status = SystemStatus.GENERATING_REPORT
-                await orch._run_phase6(state)
-
-                mock_json.assert_called_once()
-                mock_md.assert_called_once()
+            mock_json.assert_called_once()
+            mock_md.assert_called_once()
 
         assert state.status == SystemStatus.COMPLETED
 
-    async def test_run_phase6_report_failure_still_completes(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+    async def test_report_failure_still_completes(self, tmp_path):
+        from src.core.phases.report_generation import ReportGenerationPhase
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
+        ctx = self._make_ctx(config)
 
-            with (
-                patch(
-                    "src.core.orchestrator.write_json_report",
-                    side_effect=IOError("disk"),
-                ),
-                patch("src.core.orchestrator.write_markdown_report"),
-            ):
-                state = _make_state(config)
-                state.status = SystemStatus.GENERATING_REPORT
-                await orch._run_phase6(state)
+        with (
+            patch(
+                "src.core.phases.report_generation.write_json_report",
+                side_effect=IOError("disk"),
+            ),
+            patch("src.core.phases.report_generation.write_markdown_report"),
+        ):
+            state = _make_state(config)
+            state.status = SystemStatus.GENERATING_REPORT
+            phase = ReportGenerationPhase()
+            await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.COMPLETED
         assert any("Report generation failed" in e["message"] for e in state.errors)
@@ -1401,59 +1327,48 @@ class TestOrchestratorWithMocks:
 
         assert result.status == SystemStatus.AWAITING_HUMAN
 
-    async def test_run_phase2_with_risky_files_transitions_to_analyzing_conflicts(
+    async def test_auto_merge_with_risky_files_transitions_to_analyzing_conflicts(
         self, tmp_path
     ):
-        from src.core.orchestrator import Orchestrator
+        from src.core.phases.auto_merge import AutoMergePhase
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-            orch.executor.execute_auto_merge = AsyncMock(
-                return_value=MagicMock(file_path="src/safe.py")
-            )
+        mock_executor = MagicMock()
+        mock_executor.execute_auto_merge = AsyncMock(
+            return_value=MagicMock(file_path="src/safe.py")
+        )
+        ctx = self._make_ctx(config, agents={"executor": mock_executor})
 
-            state = _make_state(config)
-            state.status = SystemStatus.AUTO_MERGING
-            state.merge_plan = _make_merge_plan(
-                auto_safe_files=["src/safe.py"],
-                risky_files=["src/risky.py"],
-            )
-            object.__setattr__(state, "_file_diffs", [_make_file_diff("src/safe.py")])
-            await orch._run_phase2(state)
+        state = _make_state(config)
+        state.status = SystemStatus.AUTO_MERGING
+        state.merge_plan = _make_merge_plan(
+            auto_safe_files=["src/safe.py"],
+            risky_files=["src/risky.py"],
+        )
+        object.__setattr__(state, "_file_diffs", [_make_file_diff("src/safe.py")])
+        phase = AutoMergePhase()
+        await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.ANALYZING_CONFLICTS
 
-    async def test_run_phase1_5_critical_replan_calls_phase1(self, tmp_path):
-        from src.core.orchestrator import Orchestrator
+    async def test_plan_review_critical_replan_calls_planning(self, tmp_path):
+        from src.core.phases.plan_review import PlanReviewPhase
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
-            orch.planner_judge.review_plan = AsyncMock(
-                return_value=_make_plan_judge_verdict(PlanJudgeResult.CRITICAL_REPLAN)
-            )
-            orch.planner.run = AsyncMock()
+        mock_planner = MagicMock()
+        mock_planner.run = AsyncMock()
+        mock_pj = MagicMock()
+        mock_pj.review_plan = AsyncMock(
+            return_value=_make_plan_judge_verdict(PlanJudgeResult.CRITICAL_REPLAN)
+        )
+        ctx = self._make_ctx(
+            config, agents={"planner": mock_planner, "planner_judge": mock_pj}
+        )
 
-            state = _make_state(config)
-            state.status = SystemStatus.PLAN_REVIEWING
-            state.merge_plan = _make_merge_plan()
-            await orch._run_phase1_5(state)
+        state = _make_state(config)
+        state.status = SystemStatus.PLAN_REVIEWING
+        state.merge_plan = _make_merge_plan()
+        phase = PlanReviewPhase()
+        await phase.execute(state, ctx)
 
-        orch.planner.run.assert_awaited_once()
+        mock_planner.run.assert_awaited_once()

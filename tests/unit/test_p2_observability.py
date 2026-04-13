@@ -593,27 +593,10 @@ class TestOrchestratorAppendRecords:
         )
         return state
 
-    def _make_orchestrator(self):
-        from src.core.orchestrator import Orchestrator
-        from src.models.config import MergeConfig
-
-        config = MergeConfig(upstream_ref="upstream/main", fork_ref="fork/main")
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.GateRunner"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            return Orchestrator(config)
-
     def test_append_execution_record(self):
         from src.models.state import PhaseResult
+        from src.core.phases._gate_helpers import append_execution_record
 
-        orch = self._make_orchestrator()
         state = self._make_state_with_live_plan()
 
         phase_result = PhaseResult(
@@ -622,7 +605,7 @@ class TestOrchestratorAppendRecords:
             started_at=datetime.now(),
             completed_at=datetime.now(),
         )
-        orch._append_execution_record(state, "auto_merge", phase_result, 10)
+        append_execution_record(state, "auto_merge", phase_result, 10)
 
         assert isinstance(state.merge_plan, MergePlanLive)
         assert len(state.merge_plan.execution_records) == 1
@@ -634,8 +617,8 @@ class TestOrchestratorAppendRecords:
         from src.models.state import MergeState, PhaseResult
         from src.models.config import MergeConfig
         from src.models.plan import MergePlan
+        from src.core.phases._gate_helpers import append_execution_record
 
-        orch = self._make_orchestrator()
         config = MergeConfig(upstream_ref="u", fork_ref="f")
         state = MergeState(config=config)
         rs = RiskSummary(
@@ -662,13 +645,13 @@ class TestOrchestratorAppendRecords:
             status="completed",
             started_at=datetime.now(),
         )
-        orch._append_execution_record(state, "auto_merge", phase_result, 5)
+        append_execution_record(state, "auto_merge", phase_result, 5)
         assert not isinstance(state.merge_plan, MergePlanLive)
 
     def test_append_judge_record(self):
         from src.models.judge import JudgeVerdict, VerdictType
+        from src.core.phases._gate_helpers import append_judge_record
 
-        orch = self._make_orchestrator()
         state = self._make_state_with_live_plan()
 
         state.judge_verdict = JudgeVerdict(
@@ -695,7 +678,7 @@ class TestOrchestratorAppendRecords:
         )
         state.judge_repair_rounds = 1
 
-        orch._append_judge_record(state, 1)
+        append_judge_record(state, 1)
 
         assert isinstance(state.merge_plan, MergePlanLive)
         assert len(state.merge_plan.judge_records) == 1
@@ -706,8 +689,8 @@ class TestOrchestratorAppendRecords:
 
     def test_append_judge_record_multiple_rounds(self):
         from src.models.judge import JudgeVerdict, VerdictType
+        from src.core.phases._gate_helpers import append_judge_record
 
-        orch = self._make_orchestrator()
         state = self._make_state_with_live_plan()
 
         for round_num in range(3):
@@ -726,7 +709,7 @@ class TestOrchestratorAppendRecords:
                 timestamp=datetime.now(),
                 judge_model="test",
             )
-            orch._append_judge_record(state, round_num)
+            append_judge_record(state, round_num)
 
         assert isinstance(state.merge_plan, MergePlanLive)
         assert len(state.merge_plan.judge_records) == 3
@@ -736,7 +719,8 @@ class TestOrchestratorAppendRecords:
         assert state.merge_plan.judge_records[2].verdict == "pass"
 
     def test_append_gate_record(self):
-        orch = self._make_orchestrator()
+        from src.core.phases._gate_helpers import append_gate_record
+
         state = self._make_state_with_live_plan()
 
         gate_entry = {
@@ -747,7 +731,7 @@ class TestOrchestratorAppendRecords:
                 {"gate_name": "test", "passed": True, "exit_code": 0},
             ],
         }
-        orch._append_gate_record(state, "layer_3", gate_entry)
+        append_gate_record(state, "layer_3", gate_entry)
 
         assert isinstance(state.merge_plan, MergePlanLive)
         assert len(state.merge_plan.gate_records) == 1
@@ -757,11 +741,12 @@ class TestOrchestratorAppendRecords:
         assert len(grec.gate_results) == 2
 
     def test_append_judge_record_skips_when_no_verdict(self):
-        orch = self._make_orchestrator()
+        from src.core.phases._gate_helpers import append_judge_record
+
         state = self._make_state_with_live_plan()
         state.judge_verdict = None
 
-        orch._append_judge_record(state, 0)
+        append_judge_record(state, 0)
 
         assert isinstance(state.merge_plan, MergePlanLive)
         assert len(state.merge_plan.judge_records) == 0
