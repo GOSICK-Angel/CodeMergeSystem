@@ -1,0 +1,380 @@
+"""Tests for extracted Phase classes.
+
+Each test verifies that the Phase produces the correct PhaseOutcome
+and makes the expected state transitions via mocked dependencies.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from src.core.phases.base import PhaseContext, PhaseOutcome
+from src.core.phases.initialize import InitializePhase
+from src.core.phases.planning import PlanningPhase
+from src.core.phases.plan_review import PlanReviewPhase
+from src.core.phases.auto_merge import AutoMergePhase
+from src.core.phases.conflict_analysis import (
+    ConflictAnalysisPhase,
+    _select_merge_strategy,
+)
+from src.core.phases.human_review import HumanReviewPhase
+from src.core.phases.judge_review import JudgeReviewPhase
+from src.core.phases.report_generation import ReportGenerationPhase
+from src.models.config import MergeConfig, ThresholdConfig
+from src.models.decision import MergeDecision
+from src.models.plan import (
+    MergePlan,
+    MergePhase,
+    PhaseFileBatch,
+    RiskSummary,
+)
+from src.models.state import MergeState, SystemStatus
+
+
+def _make_config(**overrides):
+    defaults = {"upstream_ref": "upstream/main", "fork_ref": "fork/main"}
+    defaults.update(overrides)
+    return MergeConfig(**defaults)
+
+
+def _make_state(**overrides):
+    config = overrides.pop("config", _make_config())
+    state = MergeState(config=config, **overrides)
+    return state
+
+
+def _make_plan(**overrides):
+    defaults = {
+        "created_at": datetime.now(),
+        "upstream_ref": "upstream/main",
+        "fork_ref": "fork/main",
+        "merge_base_commit": "abc123",
+        "phases": [
+            PhaseFileBatch(
+                batch_id="b1",
+                phase=MergePhase.ANALYSIS,
+                file_paths=["a.py"],
+                risk_level="auto_safe",
+            )
+        ],
+        "risk_summary": RiskSummary(
+            total_files=1,
+            auto_safe_count=1,
+            auto_risky_count=0,
+            human_required_count=0,
+            deleted_only_count=0,
+            binary_count=0,
+            excluded_count=0,
+            estimated_auto_merge_rate=1.0,
+        ),
+        "project_context_summary": "test project",
+    }
+    defaults.update(overrides)
+    return MergePlan(**defaults)
+
+
+def _make_ctx(**overrides):
+    defaults = {
+        "config": _make_config(),
+        "git_tool": MagicMock(),
+        "gate_runner": MagicMock(),
+        "state_machine": MagicMock(),
+        "message_bus": MagicMock(),
+        "checkpoint": MagicMock(),
+        "phase_runner": MagicMock(),
+        "memory_store": MagicMock(),
+        "summarizer": MagicMock(),
+    }
+    defaults.update(overrides)
+    return PhaseContext(**defaults)
+
+
+# ---------------------------------------------------------------------------
+# PlanningPhase
+# ---------------------------------------------------------------------------
+
+
+class TestPlanningPhase:
+    @pytest.mark.asyncio
+    async def test_planning_success(self):
+        planner = AsyncMock()
+        planner.run = AsyncMock()
+        ctx = _make_ctx(agents={"planner": planner})
+        state = _make_state(status=SystemStatus.PLANNING)
+
+        phase = PlanningPhase()
+        outcome = await phase.execute(state, ctx)
+
+        planner.run.assert_awaited_once_with(state)
+        ctx.state_machine.transition.assert_called_once_with(
+            state, SystemStatus.PLAN_REVIEWING, "phase 1 complete"
+        )
+        assert outcome.target_status == SystemStatus.PLAN_REVIEWING
+        assert outcome.should_checkpoint
+        assert outcome.checkpoint_tag == "after_phase1"
+        assert outcome.memory_phase == "planning"
+
+    @pytest.mark.asyncio
+    async def test_planning_failure_propagates(self):
+        planner = AsyncMock()
+        planner.run = AsyncMock(side_effect=RuntimeError("LLM failed"))
+        ctx = _make_ctx(agents={"planner": planner})
+        state = _make_state(status=SystemStatus.PLANNING)
+
+        phase = PlanningPhase()
+        with pytest.raises(RuntimeError, match="LLM failed"):
+            await phase.execute(state, ctx)
+
+        assert state.phase_results["analysis"].status == "failed"
+
+
+# ---------------------------------------------------------------------------
+# PlanReviewPhase
+# ---------------------------------------------------------------------------
+
+
+class TestPlanReviewPhase:
+    @pytest.mark.asyncio
+    async def test_approved(self):
+        from src.models.plan_judge import PlanJudgeResult, PlanJudgeVerdict
+
+        verdict = PlanJudgeVerdict(
+            result=PlanJudgeResult.APPROVED,
+            issues=[],
+            approved_files_count=5,
+            flagged_files_count=0,
+            summary="All good",
+            judge_model="gpt-4o",
+            timestamp=datetime.now(),
+        )
+        planner_judge = MagicMock()
+        planner_judge.review_plan = AsyncMock(return_value=verdict)
+
+        state = _make_state(status=SystemStatus.PLAN_REVIEWING)
+        state.merge_plan = _make_plan()
+
+        ctx = _make_ctx(agents={"planner": MagicMock(), "planner_judge": planner_judge})
+
+        phase = PlanReviewPhase()
+        with patch("src.core.phases.plan_review.write_plan_review_report"):
+            outcome = await phase.execute(state, ctx)
+
+        assert outcome.target_status == SystemStatus.AWAITING_HUMAN
+        assert outcome.reason == "plan approved by judge"
+        assert outcome.should_checkpoint
+
+    @pytest.mark.asyncio
+    async def test_llm_failure_skips_review(self):
+        from src.models.plan_judge import PlanJudgeResult, PlanJudgeVerdict
+
+        verdict = PlanJudgeVerdict(
+            result=PlanJudgeResult.REVISION_NEEDED,
+            issues=[],
+            approved_files_count=0,
+            flagged_files_count=0,
+            summary="Parse failed: invalid JSON",
+            judge_model="gpt-4o",
+            timestamp=datetime.now(),
+        )
+        planner_judge = MagicMock()
+        planner_judge.review_plan = AsyncMock(return_value=verdict)
+
+        state = _make_state(status=SystemStatus.PLAN_REVIEWING)
+        state.merge_plan = _make_plan()
+
+        ctx = _make_ctx(agents={"planner": MagicMock(), "planner_judge": planner_judge})
+
+        phase = PlanReviewPhase()
+        with patch("src.core.phases.plan_review.write_plan_review_report"):
+            outcome = await phase.execute(state, ctx)
+
+        assert outcome.target_status == SystemStatus.AWAITING_HUMAN
+        assert "unavailable" in outcome.reason
+
+
+# ---------------------------------------------------------------------------
+# HumanReviewPhase
+# ---------------------------------------------------------------------------
+
+
+class TestHumanReviewPhase:
+    @pytest.mark.asyncio
+    async def test_no_human_review_pauses(self):
+        state = _make_state(status=SystemStatus.AWAITING_HUMAN)
+        state.merge_plan = _make_plan()
+
+        ctx = _make_ctx()
+
+        phase = HumanReviewPhase()
+        with patch("src.core.phases.human_review.write_merge_plan_report"):
+            outcome = await phase.execute(state, ctx)
+
+        assert outcome.target_status == SystemStatus.AWAITING_HUMAN
+        assert outcome.extra.get("paused") is True
+        assert outcome.should_checkpoint
+
+    @pytest.mark.asyncio
+    async def test_approve_transitions_to_auto_merging(self):
+        from src.models.plan_review import PlanHumanDecision, PlanHumanReview
+
+        state = _make_state(status=SystemStatus.AWAITING_HUMAN)
+        state.plan_human_review = PlanHumanReview(
+            decision=PlanHumanDecision.APPROVE,
+            reviewer="human",
+        )
+
+        ctx = _make_ctx()
+
+        phase = HumanReviewPhase()
+        with patch("src.core.phases.human_review.write_plan_review_report"):
+            outcome = await phase.execute(state, ctx)
+
+        assert outcome.target_status == SystemStatus.AUTO_MERGING
+        ctx.state_machine.transition.assert_called_once_with(
+            state, SystemStatus.AUTO_MERGING, "plan approved by human reviewer"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reject_transitions_to_failed(self):
+        from src.models.plan_review import PlanHumanDecision, PlanHumanReview
+
+        state = _make_state(status=SystemStatus.AWAITING_HUMAN)
+        state.plan_human_review = PlanHumanReview(
+            decision=PlanHumanDecision.REJECT,
+            reviewer="human",
+        )
+
+        ctx = _make_ctx()
+
+        phase = HumanReviewPhase()
+        with patch("src.core.phases.human_review.write_plan_review_report"):
+            outcome = await phase.execute(state, ctx)
+
+        assert outcome.target_status == SystemStatus.FAILED
+
+
+# ---------------------------------------------------------------------------
+# ReportGenerationPhase
+# ---------------------------------------------------------------------------
+
+
+class TestReportGenerationPhase:
+    @pytest.mark.asyncio
+    async def test_report_success(self):
+        state = _make_state(status=SystemStatus.GENERATING_REPORT)
+
+        ctx = _make_ctx()
+
+        phase = ReportGenerationPhase()
+        with (
+            patch("src.core.phases.report_generation.write_json_report"),
+            patch("src.core.phases.report_generation.write_markdown_report"),
+            patch("src.core.phases.report_generation.write_living_plan_report"),
+        ):
+            outcome = await phase.execute(state, ctx)
+
+        assert outcome.target_status == SystemStatus.COMPLETED
+        assert outcome.checkpoint_tag == "completed"
+        ctx.state_machine.transition.assert_called_once_with(
+            state, SystemStatus.COMPLETED, "reports generated"
+        )
+
+    @pytest.mark.asyncio
+    async def test_report_failure_still_completes(self):
+        state = _make_state(status=SystemStatus.GENERATING_REPORT)
+
+        ctx = _make_ctx()
+
+        phase = ReportGenerationPhase()
+        with (
+            patch(
+                "src.core.phases.report_generation.write_json_report",
+                side_effect=OSError("disk full"),
+            ),
+            patch("src.core.phases.report_generation.write_markdown_report"),
+            patch("src.core.phases.report_generation.write_living_plan_report"),
+        ):
+            outcome = await phase.execute(state, ctx)
+
+        assert outcome.target_status == SystemStatus.COMPLETED
+        assert len(state.errors) == 1
+        assert "disk full" in state.errors[0]["message"]
+
+
+# ---------------------------------------------------------------------------
+# _select_merge_strategy (conflict_analysis helper)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectMergeStrategy:
+    def _make_analysis(self, **overrides):
+        from src.models.conflict import ConflictAnalysis, ConflictType
+
+        defaults = {
+            "file_path": "a.py",
+            "conflict_points": [],
+            "overall_confidence": 0.5,
+            "conflict_type": ConflictType.CONCURRENT_MODIFICATION,
+            "confidence": 0.5,
+            "can_coexist": False,
+            "is_security_sensitive": False,
+            "recommended_strategy": MergeDecision.TAKE_TARGET,
+            "rationale": "test",
+        }
+        defaults.update(overrides)
+        return ConflictAnalysis(**defaults)
+
+    def test_low_confidence_escalates(self):
+        analysis = self._make_analysis(confidence=0.3)
+        thresholds = ThresholdConfig()
+        result = _select_merge_strategy(analysis, thresholds)
+        assert result == MergeDecision.ESCALATE_HUMAN
+
+    def test_security_sensitive_escalates(self):
+        analysis = self._make_analysis(confidence=0.9, is_security_sensitive=True)
+        thresholds = ThresholdConfig()
+        result = _select_merge_strategy(analysis, thresholds)
+        assert result == MergeDecision.ESCALATE_HUMAN
+
+    def test_high_confidence_coexist_semantic_merge(self):
+        analysis = self._make_analysis(confidence=0.95, can_coexist=True)
+        thresholds = ThresholdConfig()
+        result = _select_merge_strategy(analysis, thresholds)
+        assert result == MergeDecision.SEMANTIC_MERGE
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle: before → execute → after via run()
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseLifecycleIntegration:
+    @pytest.mark.asyncio
+    async def test_planning_via_run(self):
+        planner = AsyncMock()
+        planner.run = AsyncMock()
+        ctx = _make_ctx(agents={"planner": planner})
+        state = _make_state(status=SystemStatus.PLANNING)
+
+        phase = PlanningPhase()
+        outcome = await phase.run(state, ctx)
+
+        assert outcome.target_status == SystemStatus.PLAN_REVIEWING
+
+    @pytest.mark.asyncio
+    async def test_report_via_run(self):
+        state = _make_state(status=SystemStatus.GENERATING_REPORT)
+        ctx = _make_ctx()
+
+        phase = ReportGenerationPhase()
+        with (
+            patch("src.core.phases.report_generation.write_json_report"),
+            patch("src.core.phases.report_generation.write_markdown_report"),
+            patch("src.core.phases.report_generation.write_living_plan_report"),
+        ):
+            outcome = await phase.run(state, ctx)
+
+        assert outcome.target_status == SystemStatus.COMPLETED
