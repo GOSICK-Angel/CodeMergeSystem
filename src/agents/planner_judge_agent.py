@@ -6,7 +6,7 @@ from src.models.diff import FileDiff
 from src.models.plan_judge import PlanJudgeVerdict
 from src.models.state import MergeState
 from src.llm.prompts.planner_judge_prompts import (
-    PLANNER_JUDGE_SYSTEM,
+    get_planner_judge_system,
     build_plan_review_prompt,
 )
 from src.llm.response_parser import parse_plan_judge_verdict
@@ -26,7 +26,8 @@ class PlannerJudgeAgent(BaseAgent):
         if hasattr(state, "_file_diffs"):
             file_diffs = state._file_diffs or []
 
-        verdict = await self.review_plan(state.merge_plan, file_diffs, 0)
+        lang = state.config.output.language
+        verdict = await self.review_plan(state.merge_plan, file_diffs, 0, lang=lang)
 
         return AgentMessage(
             sender=AgentType.PLANNER_JUDGE,
@@ -42,31 +43,33 @@ class PlannerJudgeAgent(BaseAgent):
         plan: MergePlan,
         file_diffs: list[FileDiff],
         revision_round: int,
+        lang: str = "en",
     ) -> PlanJudgeVerdict:
-        prompt = build_plan_review_prompt(plan, file_diffs)
+        prompt = build_plan_review_prompt(plan, file_diffs, lang=lang)
 
         if revision_round > 0:
             prompt = f"[Revision round {revision_round}]\n\n" + prompt
 
         messages = [{"role": "user", "content": prompt}]
 
+        system = get_planner_judge_system(lang)
         try:
-            raw = await self._call_llm_with_retry(messages, system=PLANNER_JUDGE_SYSTEM)
+            raw = await self._call_llm_with_retry(messages, system=system)
             return parse_plan_judge_verdict(
                 str(raw), self.llm_config.model, revision_round
             )
         except Exception as e:
-            self.logger.error(f"Plan review failed: {e}")
+            self.logger.error("Plan review failed: %s", e)
             from src.models.plan_judge import PlanJudgeResult
             from datetime import datetime
 
             return PlanJudgeVerdict(
-                result=PlanJudgeResult.APPROVED,
+                result=PlanJudgeResult.REVISION_NEEDED,
                 revision_round=revision_round,
                 issues=[],
-                approved_files_count=plan.risk_summary.total_files,
+                approved_files_count=0,
                 flagged_files_count=0,
-                summary=f"Review failed, defaulting to approved: {e}",
+                summary=f"Review parse failed (raw response could not be parsed as JSON): {e}",
                 judge_model=self.llm_config.model,
                 timestamp=datetime.now(),
             )

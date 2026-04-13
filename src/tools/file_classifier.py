@@ -203,15 +203,32 @@ def classify_all_files(
     upstream_ref: str,
     git_tool: GitTool,
 ) -> dict[str, FileChangeCategory]:
-    head_files = set(git_tool.list_files(head_ref))
-    upstream_files = set(git_tool.list_files(upstream_ref))
-    all_paths = head_files | upstream_files
+    base_hashes = git_tool.list_files_with_hashes(merge_base)
+    head_hashes = git_tool.list_files_with_hashes(head_ref)
+    up_hashes = git_tool.list_files_with_hashes(upstream_ref)
+    all_paths = set(head_hashes) | set(up_hashes)
 
     result: dict[str, FileChangeCategory] = {}
     for file_path in sorted(all_paths):
-        result[file_path] = classify_three_way(
-            file_path, merge_base, head_ref, upstream_ref, git_tool
-        )
+        head_hash = head_hashes.get(file_path)
+        up_hash = up_hashes.get(file_path)
+        base_hash = base_hashes.get(file_path)
+
+        if head_hash is None and up_hash is not None:
+            cat = FileChangeCategory.D_MISSING
+        elif head_hash is not None and up_hash is None:
+            cat = FileChangeCategory.D_EXTRA
+        elif head_hash is None and up_hash is None:
+            cat = FileChangeCategory.A
+        elif head_hash == up_hash:
+            cat = FileChangeCategory.A
+        elif head_hash == base_hash:
+            cat = FileChangeCategory.B
+        elif up_hash == base_hash:
+            cat = FileChangeCategory.E
+        else:
+            cat = FileChangeCategory.C
+        result[file_path] = cat
     return result
 
 

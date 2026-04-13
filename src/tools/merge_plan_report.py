@@ -1,0 +1,322 @@
+"""Generate a comprehensive merge plan report for human review."""
+
+from __future__ import annotations
+
+import logging
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+
+from src.models.diff import FileChangeCategory, RiskLevel
+from src.models.state import MergeState
+
+logger = logging.getLogger(__name__)
+
+
+def write_merge_plan_report(state: MergeState) -> Path:
+    """Write a detailed merge plan Markdown report to MERGE_RECORD/.
+
+    Returns the path of the generated file.
+    """
+    repo_path = Path(state.config.repo_path).resolve()
+    record_dir = repo_path / "MERGE_RECORD"
+    record_dir.mkdir(parents=True, exist_ok=True)
+
+    upstream = state.config.upstream_ref.replace("/", "_")
+    filename = f"MERGE_PLAN_{upstream}_{state.run_id[:8]}.md"
+    report_path = record_dir / filename
+
+    if report_path.exists():
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"MERGE_PLAN_{upstream}_{state.run_id[:8]}_{ts}.md"
+        report_path = record_dir / filename
+
+    lang = state.config.output.language
+    lines = _build_report(state, lang)
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+
+    logger.info("Merge plan report written to %s", report_path)
+    return report_path
+
+
+def _build_report(state: MergeState, lang: str) -> list[str]:
+    zh = lang == "zh"
+    plan = state.merge_plan
+    file_diffs = getattr(state, "_file_diffs", None) or []
+
+    lines: list[str] = []
+
+    _header(lines, state, zh)
+    _classification_summary(lines, state, zh)
+    _directory_matrix(lines, state, zh)
+    _risk_files(lines, file_diffs, zh)
+    _batch_plan(lines, plan, zh)
+    _layer_dependencies(lines, plan, zh)
+    _planner_judge_log(lines, state, zh)
+
+    return lines
+
+
+def _header(lines: list[str], state: MergeState, zh: bool) -> None:
+    plan = state.merge_plan
+    title = "合并计划" if zh else "Merge Plan"
+    lines += [
+        f"# {title}: {state.config.upstream_ref} → {state.config.fork_ref}",
+        "",
+        f"{'生成时间' if zh else 'Generated'}: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"Merge base: `{state.merge_base_commit[:12]}`",
+        f"Run ID: `{state.run_id}`",
+    ]
+
+    if state.config.project_context:
+        ctx_label = "项目背景" if zh else "Project Context"
+        lines += [
+            "",
+            f"**{ctx_label}**: {state.config.project_context.strip()}",
+        ]
+
+    if plan:
+        rs = plan.risk_summary
+        total = rs.total_files
+        auto = rs.auto_safe_count + rs.auto_risky_count
+        rate_label = "自动合并率" if zh else "Auto-merge rate"
+        lines += [
+            "",
+            f"| {'指标' if zh else 'Metric'} | {'值' if zh else 'Value'} |",
+            "|------|------|",
+            f"| {'总文件数' if zh else 'Total files'} | {total} |",
+            f"| {'安全自动合并' if zh else 'Auto-safe'} | {rs.auto_safe_count} |",
+            f"| {'风险自动合并' if zh else 'Auto-risky'} | {rs.auto_risky_count} |",
+            f"| {'需人工审查' if zh else 'Human required'} | {rs.human_required_count} |",
+            f"| {rate_label} | {rs.estimated_auto_merge_rate:.1%} |",
+        ]
+
+    lines += ["", "---", ""]
+
+
+def _classification_summary(lines: list[str], state: MergeState, zh: bool) -> None:
+    cats = state.file_categories
+    if not cats:
+        return
+
+    counts: dict[str, int] = defaultdict(int)
+    for cat in cats.values():
+        counts[cat.value] += 1
+
+    title = "文件三路分类统计" if zh else "Three-way Classification Summary"
+    lines += [
+        f"## {title}",
+        "",
+        f"| {'分类' if zh else 'Category'} | {'数量' if zh else 'Count'} | {'说明' if zh else 'Description'} |",
+        "|------|------|------|",
+    ]
+
+    desc_map_zh = {
+        "unchanged": "HEAD 与 upstream 相同，无需处理",
+        "upstream_only": "仅 upstream 修改，可直接采纳",
+        "both_changed": "两边都改了，需三方合并",
+        "upstream_new": "upstream 新增文件",
+        "current_only": "current 独有文件，保留",
+        "current_only_change": "仅 current 修改，保留",
+    }
+    desc_map_en = {
+        "unchanged": "Same in HEAD and upstream, skip",
+        "upstream_only": "Only upstream changed, take upstream",
+        "both_changed": "Both changed, three-way merge needed",
+        "upstream_new": "New file from upstream",
+        "current_only": "Current-only file, keep",
+        "current_only_change": "Only current changed, keep",
+    }
+    label_map = {
+        "unchanged": "A",
+        "upstream_only": "B",
+        "both_changed": "C",
+        "upstream_new": "D-missing",
+        "current_only": "D-extra",
+        "current_only_change": "E",
+    }
+    desc_map = desc_map_zh if zh else desc_map_en
+
+    for key in [
+        "unchanged",
+        "upstream_only",
+        "both_changed",
+        "upstream_new",
+        "current_only",
+        "current_only_change",
+    ]:
+        label = label_map.get(key, key)
+        desc = desc_map.get(key, "")
+        lines.append(f"| {label} ({key}) | {counts.get(key, 0)} | {desc} |")
+
+    lines += ["", "---", ""]
+
+
+def _directory_matrix(lines: list[str], state: MergeState, zh: bool) -> None:
+    cats = state.file_categories
+    if not cats:
+        return
+
+    dir_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for fp, cat in cats.items():
+        parts = fp.split("/")
+        dir_key = "/".join(parts[:2]) if len(parts) > 1 else parts[0]
+        dir_counts[dir_key][cat.value] += 1
+
+    actionable_dirs = {
+        d: c
+        for d, c in dir_counts.items()
+        if c.get("upstream_only", 0)
+        + c.get("both_changed", 0)
+        + c.get("upstream_new", 0)
+        > 0
+    }
+
+    if not actionable_dirs:
+        return
+
+    title = "按目录分类矩阵" if zh else "Directory Classification Matrix"
+    lines += [
+        f"## {title}",
+        "",
+        f"| {'目录' if zh else 'Directory'} | B | C | D-missing | {'合计' if zh else 'Total'} |",
+        "|------|---|---|-----------|-------|",
+    ]
+
+    for d in sorted(actionable_dirs.keys()):
+        c = actionable_dirs[d]
+        b = c.get("upstream_only", 0)
+        cc = c.get("both_changed", 0)
+        dm = c.get("upstream_new", 0)
+        total = b + cc + dm
+        lines.append(f"| {d} | {b} | {cc} | {dm} | {total} |")
+
+    lines += ["", "---", ""]
+
+
+def _risk_files(lines: list[str], file_diffs: list, zh: bool) -> None:
+    risky = [
+        fd
+        for fd in file_diffs
+        if fd.risk_level in (RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED)
+    ]
+
+    if not risky:
+        return
+
+    title = "高风险文件清单" if zh else "High-risk Files"
+    lines += [
+        f"## {title}",
+        "",
+        f"| {'文件' if zh else 'File'} | {'风险等级' if zh else 'Risk'} "
+        f"| {'风险分' if zh else 'Score'} | {'安全敏感' if zh else 'Security'} "
+        f"| {'分类' if zh else 'Category'} |",
+        "|------|------|-------|------|------|",
+    ]
+
+    risky.sort(key=lambda fd: fd.risk_score, reverse=True)
+    for fd in risky:
+        risk = fd.risk_level.value if hasattr(fd.risk_level, "value") else fd.risk_level
+        cat = (
+            fd.change_category.value
+            if fd.change_category and hasattr(fd.change_category, "value")
+            else str(fd.change_category or "")
+        )
+        sec = "⚠️" if fd.is_security_sensitive else ""
+        lines.append(
+            f"| `{fd.file_path}` | {risk} | {fd.risk_score:.2f} | {sec} | {cat} |"
+        )
+
+    lines += ["", "---", ""]
+
+
+def _batch_plan(lines: list[str], plan, zh: bool) -> None:
+    if not plan:
+        return
+
+    title = "合并批次计划" if zh else "Merge Batch Plan"
+    lines += [f"## {title}", ""]
+
+    for batch in plan.phases:
+        risk = (
+            batch.risk_level.value
+            if hasattr(batch.risk_level, "value")
+            else batch.risk_level
+        )
+        cat = ""
+        if batch.change_category:
+            cat_val = (
+                batch.change_category.value
+                if hasattr(batch.change_category, "value")
+                else str(batch.change_category)
+            )
+            cat = f" [{cat_val}]"
+
+        batch_title = "批次" if zh else "Batch"
+        files_label = "文件" if zh else "files"
+        lines += [
+            f"### {batch_title} `{batch.batch_id}` — {risk}{cat}",
+            f"Layer: {batch.layer_id} | {len(batch.file_paths)} {files_label}",
+            "",
+        ]
+
+        for fp in batch.file_paths:
+            lines.append(f"- `{fp}`")
+        lines.append("")
+
+    lines += ["---", ""]
+
+
+def _layer_dependencies(lines: list[str], plan, zh: bool) -> None:
+    if not plan or not plan.layers:
+        return
+
+    title = "层级依赖关系" if zh else "Layer Dependencies"
+    lines += [f"## {title}", ""]
+
+    for layer in plan.layers:
+        deps = (
+            ", ".join(str(d) for d in layer.depends_on)
+            if layer.depends_on
+            else ("无" if zh else "none")
+        )
+        lines.append(
+            f"- **[{layer.layer_id}] {layer.name}**: {layer.description} "
+            f"({'依赖' if zh else 'depends on'}: {deps})"
+        )
+
+    lines += ["", "---", ""]
+
+
+def _planner_judge_log(lines: list[str], state: MergeState, zh: bool) -> None:
+    title = "Planner-Judge 审查记录" if zh else "Planner-Judge Review Log"
+    lines += [f"## {title}", ""]
+
+    if not state.plan_review_log:
+        no_record = "暂无审查记录。" if zh else "No review rounds recorded."
+        lines += [f"_{no_record}_", ""]
+        return
+
+    for rnd in state.plan_review_log:
+        result = (
+            rnd.verdict_result.value
+            if hasattr(rnd.verdict_result, "value")
+            else rnd.verdict_result
+        )
+        round_label = "轮次" if zh else "Round"
+        lines += [
+            f"### {round_label} {rnd.round_number}",
+            f"- **{'结论' if zh else 'Verdict'}**: {result}",
+            f"- **{'摘要' if zh else 'Summary'}**: {rnd.verdict_summary}",
+            f"- **{'问题数' if zh else 'Issues'}**: {rnd.issues_count}",
+        ]
+        if rnd.issues_detail:
+            detail_label = "问题详情" if zh else "Issue Details"
+            lines.append(f"- **{detail_label}**:")
+            for issue in rnd.issues_detail:
+                lines.append(
+                    f"  - `{issue.get('file_path', '?')}`: "
+                    f"{issue.get('reason', '')} "
+                    f"({issue.get('current', '?')} → {issue.get('suggested', '?')})"
+                )
+        lines.append("")

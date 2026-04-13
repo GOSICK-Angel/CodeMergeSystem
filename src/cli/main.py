@@ -38,14 +38,33 @@ def cli() -> None:
     type=int,
     help="GitHub PR number for review comment integration",
 )
+@click.option(
+    "--no-tui",
+    is_flag=True,
+    help="Disable interactive TUI, use plain text output",
+)
+@click.option(
+    "--ws-port",
+    default=8765,
+    type=int,
+    help="WebSocket port for TUI bridge (default: 8765)",
+)
 def run_command(
     config: str,
     dry_run: bool,
     export_decisions: str | None,
     ci: bool,
     github_pr: int | None,
+    no_tui: bool,
+    ws_port: int,
 ) -> None:
     """Execute complete merge workflow"""
+    if not ci and not no_tui:
+        from src.cli.commands.tui import tui_command_impl
+
+        tui_command_impl(config, ws_port, dry_run)
+        return
+
     from src.cli.commands.run import run_command_impl
 
     run_command_impl(config, dry_run, export_decisions, ci=ci, github_pr=github_pr)

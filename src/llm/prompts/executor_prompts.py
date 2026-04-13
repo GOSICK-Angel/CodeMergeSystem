@@ -52,34 +52,3 @@ Produce a merged file that:
 4. Is syntactically valid
 
 Return ONLY the merged file content."""
-
-
-def build_dispute_prompt(
-    file_diff: FileDiff,
-    current_classification: str,
-    observed_issues: str,
-) -> str:
-    return f"""As an Executor agent, you have observed potential issues with the current file classification.
-
-File: {file_diff.file_path}
-Current classification: {current_classification}
-Lines added: {file_diff.lines_added}
-Lines deleted: {file_diff.lines_deleted}
-Conflicts: {file_diff.conflict_count}
-Security sensitive: {file_diff.is_security_sensitive}
-
-Observed issues:
-{observed_issues}
-
-Provide a structured dispute request explaining:
-1. Why the current classification may be incorrect
-2. What classification you suggest
-3. The potential impact of proceeding with the current classification
-
-Return JSON:
-{{
-  "dispute_reason": "Specific reason why classification is wrong",
-  "suggested_reclassification": {{"path/to/file": "human_required"}},
-  "impact_assessment": "What could go wrong if we proceed with current classification",
-  "evidence": "Relevant code snippet or diff excerpt"
-}}"""

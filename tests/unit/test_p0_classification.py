@@ -36,9 +36,14 @@ def _mock_git(file_hashes: dict[str, dict[str, str | None]]) -> MagicMock:
     git.get_file_hash = MagicMock(side_effect=get_file_hash)
 
     all_files: dict[str, list[str]] = {}
+    files_with_hashes: dict[str, dict[str, str]] = {}
     for ref, paths in file_hashes.items():
         all_files[ref] = [p for p, h in paths.items() if h is not None]
+        files_with_hashes[ref] = {p: h for p, h in paths.items() if h is not None}
     git.list_files = MagicMock(side_effect=lambda ref: all_files.get(ref, []))
+    git.list_files_with_hashes = MagicMock(
+        side_effect=lambda ref: files_with_hashes.get(ref, {})
+    )
 
     return git
 

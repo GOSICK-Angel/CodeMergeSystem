@@ -13,8 +13,15 @@ export function PlanReviewScreen() {
   const status = useAppStore((s) => s.status);
   const { send } = useConnection();
   const planReviewLog = useAppStore((s) => s.planReviewLog);
+  const messages = useAppStore((s) => s.messages);
 
   const canReview = status === "awaiting_human";
+  const reportMsg = messages.find(
+    (m: { type: string }) => m.type === "plan_report"
+  );
+  const reportPath = reportMsg
+    ? (reportMsg as { content?: string }).content
+    : null;
 
   useInput((input) => {
     if (canReview && input === "a") {
@@ -27,6 +34,14 @@ export function PlanReviewScreen() {
   return (
     <Box flexDirection="column">
       <StatusBar />
+      {reportPath && (
+        <Box paddingX={1} marginBottom={1}>
+          <Text color="green" bold>
+            📄 Plan report:{" "}
+          </Text>
+          <Text color="white">{reportPath}</Text>
+        </Box>
+      )}
       <Box flexDirection="row">
         <Box flexDirection="column" flexGrow={1}>
           <PlanSummary />

@@ -179,7 +179,7 @@ def test_validate_decision_rejects_escalate_human():
 def test_plan_revision_stops_at_max_rounds():
     state = _make_state()
     max_rounds = state.config.max_plan_revision_rounds
-    assert max_rounds == 2, "Default max_plan_revision_rounds should be 2"
+    assert max_rounds == 5, "Default max_plan_revision_rounds should be 5"
 
     state.plan_revision_rounds = max_rounds
     assert state.plan_revision_rounds >= state.config.max_plan_revision_rounds, (

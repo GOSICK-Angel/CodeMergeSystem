@@ -14,14 +14,18 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-haiku-4-5-20251001": 200_000,
     "claude-3-5-sonnet-20241022": 200_000,
     "claude-3-5-haiku-20241022": 200_000,
+    "gpt-5.4": 1_000_000,
+    "gpt-4.1": 1_000_000,
     "gpt-4o": 128_000,
     "gpt-4o-mini": 128_000,
     "gpt-4-turbo": 128_000,
     "gpt-4": 8_192,
     "gpt-3.5-turbo": 16_385,
+    "o3": 200_000,
+    "o4-mini": 200_000,
 }
 
-_DEFAULT_CONTEXT_WINDOW = 8_000
+_DEFAULT_CONTEXT_WINDOW = 128_000
 _CHARS_PER_TOKEN = 3.5
 _SAFETY_MARGIN = 0.05
 

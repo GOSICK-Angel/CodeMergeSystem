@@ -1012,7 +1012,7 @@ class TestOrchestratorWithMocks:
         assert len(state.plan_review_log) == 1
         assert state.plan_review_log[0].verdict_result == PlanJudgeResult.APPROVED
 
-    async def test_run_phase1_5_exceeds_max_rounds_awaiting_human(self, tmp_path):
+    async def test_run_phase1_5_exceeds_max_rounds_proceeds(self, tmp_path):
         from src.core.orchestrator import Orchestrator
         from src.models.config import OutputConfig
 

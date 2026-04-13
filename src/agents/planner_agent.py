@@ -644,22 +644,56 @@ class PlannerAgent(BaseAgent):
         if state.merge_plan is None:
             raise ValueError("No existing plan to revise")
 
-        prompt = build_revision_prompt(state.merge_plan, judge_issues)
-        messages = [{"role": "user", "content": prompt}]
-
-        try:
-            raw_response = await self._call_llm_with_retry(
-                messages, system=PLANNER_SYSTEM
+        total_files = sum(len(b.file_paths) for b in state.merge_plan.phases)
+        if total_files > 200:
+            self.logger.info(
+                "Large plan (%d files) — using deterministic revision for %d issues",
+                total_files,
+                len(judge_issues),
             )
-            raw_str = str(raw_response).strip()
-            if raw_str.startswith("```"):
-                lines = raw_str.splitlines()
-                raw_str = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
-            plan_data = json.loads(raw_str)
-        except Exception:
             plan_data = self._apply_judge_issues_to_plan(state.merge_plan, judge_issues)
+        else:
+            prompt = build_revision_prompt(state.merge_plan, judge_issues)
+            messages = [{"role": "user", "content": prompt}]
+            try:
+                raw_response = await self._call_llm_with_retry(
+                    messages, system=PLANNER_SYSTEM
+                )
+                raw_str = str(raw_response).strip()
+                if raw_str.startswith("```"):
+                    lines = raw_str.splitlines()
+                    raw_str = "\n".join(
+                        lines[1:-1] if lines[-1] == "```" else lines[1:]
+                    )
+                plan_data = json.loads(raw_str)
+            except Exception:
+                plan_data = self._apply_judge_issues_to_plan(
+                    state.merge_plan, judge_issues
+                )
 
-        return self._build_merge_plan(plan_data, state, [])
+        file_diffs: list[FileDiff] = getattr(state, "_file_diffs", None) or []
+        plan = self._build_merge_plan(plan_data, state, file_diffs)
+
+        actionable: dict[str, FileChangeCategory] = {}
+        if state.file_categories:
+            actionable_cats = {
+                FileChangeCategory.B,
+                FileChangeCategory.C,
+                FileChangeCategory.D_MISSING,
+            }
+            actionable = {
+                fp: cat
+                for fp, cat in state.file_categories.items()
+                if cat in actionable_cats
+            }
+        if file_diffs and actionable:
+            plan = plan.model_copy(
+                update={
+                    "risk_summary": self._build_risk_summary(file_diffs, actionable)
+                }
+            )
+
+        return plan
 
     def _apply_judge_issues_to_plan(
         self, original_plan: MergePlan, judge_issues: list[PlanIssue]

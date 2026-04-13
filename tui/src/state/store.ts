@@ -61,6 +61,24 @@ interface Actions {
 
 export type AppStore = MergeStateSlice & UISlice & Actions;
 
+const MAX_ERRORS = 100;
+const MAX_MESSAGES = 200;
+const MAX_GATE_HISTORY = 50;
+
+function capArrays(data: Partial<MergeStateSlice>): Partial<MergeStateSlice> {
+  const capped = { ...data };
+  if (capped.errors && capped.errors.length > MAX_ERRORS) {
+    capped.errors = capped.errors.slice(-MAX_ERRORS);
+  }
+  if (capped.messages && capped.messages.length > MAX_MESSAGES) {
+    capped.messages = capped.messages.slice(-MAX_MESSAGES);
+  }
+  if (capped.gateHistory && capped.gateHistory.length > MAX_GATE_HISTORY) {
+    capped.gateHistory = capped.gateHistory.slice(-MAX_GATE_HISTORY);
+  }
+  return capped;
+}
+
 export const useAppStore = create<AppStore>((set) => ({
   // MergeState defaults
   runId: "",
@@ -91,8 +109,8 @@ export const useAppStore = create<AppStore>((set) => ({
   connectionStatus: "connecting",
 
   // Actions
-  applySnapshot: (data) => set((state) => ({ ...state, ...data })),
-  applyPatch: (patch) => set((state) => ({ ...state, ...patch })),
+  applySnapshot: (data) => set((state) => ({ ...state, ...capArrays(data) })),
+  applyPatch: (patch) => set((state) => ({ ...state, ...capArrays(patch) })),
   setAgentActivity: (activity) => set({ agentActivity: activity }),
   setActiveScreen: (screen) => set({ activeScreen: screen }),
   setSelectedFileIndex: (index) => set({ selectedFileIndex: index }),

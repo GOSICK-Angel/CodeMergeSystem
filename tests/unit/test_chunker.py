@@ -11,12 +11,17 @@ from src.llm.chunker import (
     ChunkKind,
     CodeChunk,
     IndentChunker,
+    _HAS_TREE_SITTER,
     detect_language,
     render_chunk,
     render_file_staged,
     render_signature,
 )
 from src.llm.relevance import RenderLevel
+
+needs_tree_sitter = pytest.mark.skipif(
+    not _HAS_TREE_SITTER, reason="tree-sitter not installed"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +101,7 @@ class TestASTChunker:
         assert len(func_chunks) >= 1
         assert "hello" in func_chunks[0].name
 
+    @needs_tree_sitter
     def test_ast_chunk_python_class_with_methods(self) -> None:
         source = (
             "class Foo:\n"

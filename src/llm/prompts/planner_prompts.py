@@ -81,32 +81,32 @@ Return JSON with this structure:
 }}"""
 
 
-def build_context_summary_prompt(repo_structure: str) -> str:
-    return f"""You are a senior code reviewer.
-
-Below is a summary of key files in a software project and change statistics between two branches.
-Based on this information, summarize in 300 words or less:
-1. The main functionality and technology stack of the project
-2. The main customization direction of the fork branch relative to upstream
-3. Modules or technical points that need special attention during merging
-
----
-Project file summary:
-{repo_structure}
-
-Please answer in English."""
+MAX_REVISION_ISSUES = 50
 
 
 def build_revision_prompt(
     original_plan: MergePlan, judge_issues: list[PlanIssue]
 ) -> str:
+    capped_issues = judge_issues[:MAX_REVISION_ISSUES]
     issues_text = "\n".join(
         f"- File: {issue.file_path}\n"
         f"  Current: {issue.current_classification.value}\n"
         f"  Suggested: {issue.suggested_classification.value}\n"
         f"  Reason: {issue.reason}\n"
         f"  Type: {issue.issue_type}"
-        for issue in judge_issues
+        for issue in capped_issues
+    )
+    if len(judge_issues) > MAX_REVISION_ISSUES:
+        issues_text += (
+            f"\n\n(Showing {MAX_REVISION_ISSUES} of {len(judge_issues)} issues. "
+            f"Apply the same reclassification pattern to similar files.)"
+        )
+
+    phases_text = "\n".join(
+        f"- Batch {b.batch_id}: phase={b.phase.value}, "
+        f"risk_level={b.risk_level.value}, "
+        f"file_count={len(b.file_paths)}"
+        for b in original_plan.phases
     )
 
     return f"""The plan reviewer has identified specific issues with the merge plan that need correction.
@@ -117,8 +117,14 @@ Original plan summary:
 - Auto-risky: {original_plan.risk_summary.auto_risky_count}
 - Human required: {original_plan.risk_summary.human_required_count}
 
+Current phases:
+{phases_text}
+
 Issues found by reviewer:
 {issues_text}
 
-Please revise only the files listed above. Do not change other file classifications.
-Return the complete revised plan in the same JSON format as the original plan."""
+Instructions:
+1. For each issue, move the file from its current batch to a new or existing batch matching the suggested classification.
+2. Do NOT change classifications of files not listed in the issues.
+3. Recalculate risk_summary counts after reclassification.
+4. Return the complete revised plan in the same JSON format as the original plan."""

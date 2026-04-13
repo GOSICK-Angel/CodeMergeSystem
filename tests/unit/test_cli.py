@@ -83,7 +83,7 @@ class TestRunCommand:
         config_file = tmp_path / "bad.yaml"
         config_file.write_text("not: valid: yaml: [")
         runner = CliRunner()
-        result = runner.invoke(cli, ["run", "--config", str(config_file)])
+        result = runner.invoke(cli, ["run", "--config", str(config_file), "--no-tui"])
         assert result.exit_code == 40
 
     def test_run_command_config_missing_required_fields(self, tmp_path):
@@ -92,7 +92,7 @@ class TestRunCommand:
         config_file = tmp_path / "incomplete.yaml"
         config_file.write_text("repo_path: .")
         runner = CliRunner()
-        result = runner.invoke(cli, ["run", "--config", str(config_file)])
+        result = runner.invoke(cli, ["run", "--config", str(config_file), "--no-tui"])
         assert result.exit_code == 40
 
     def test_run_command_completed_status(self, tmp_path):
@@ -107,7 +107,9 @@ class TestRunCommand:
             mock_orch.run = AsyncMock(return_value=final_state)
             mock_orch_cls.return_value = mock_orch
 
-            result = runner.invoke(cli, ["run", "--config", str(config_file)])
+            result = runner.invoke(
+                cli, ["run", "--config", str(config_file), "--no-tui"]
+            )
 
         assert result.exit_code == 0
         assert "completed" in result.output.lower()
@@ -124,7 +126,9 @@ class TestRunCommand:
             mock_orch.run = AsyncMock(return_value=final_state)
             mock_orch_cls.return_value = mock_orch
 
-            result = runner.invoke(cli, ["run", "--config", str(config_file)])
+            result = runner.invoke(
+                cli, ["run", "--config", str(config_file), "--no-tui"]
+            )
 
         assert result.exit_code == 0
         assert "human" in result.output.lower()
@@ -159,7 +163,9 @@ class TestRunCommand:
             mock_orch.run = AsyncMock(return_value=final_state)
             mock_orch_cls.return_value = mock_orch
 
-            result = runner.invoke(cli, ["run", "--config", str(config_file)])
+            result = runner.invoke(
+                cli, ["run", "--config", str(config_file), "--no-tui"]
+            )
 
         assert result.exit_code == 0
         assert "paused" in result.output.lower()
@@ -177,7 +183,7 @@ class TestRunCommand:
             mock_orch_cls.return_value = mock_orch
 
             result = runner.invoke(
-                cli, ["run", "--config", str(config_file), "--dry-run"]
+                cli, ["run", "--config", str(config_file), "--dry-run", "--no-tui"]
             )
 
         assert result.exit_code == 0
@@ -195,7 +201,9 @@ class TestRunCommand:
             mock_orch.run = AsyncMock(return_value=final_state)
             mock_orch_cls.return_value = mock_orch
 
-            result = runner.invoke(cli, ["run", "--config", str(config_file)])
+            result = runner.invoke(
+                cli, ["run", "--config", str(config_file), "--no-tui"]
+            )
 
         assert "upstream/main" in result.output
         assert "feature/fork" in result.output
@@ -213,7 +221,9 @@ class TestRunCommand:
                 mock_orch.run = AsyncMock(return_value=fixed_state)
                 mock_orch_cls.return_value = mock_orch
 
-                result = runner.invoke(cli, ["run", "--config", str(config_file)])
+                result = runner.invoke(
+                    cli, ["run", "--config", str(config_file), "--no-tui"]
+                )
 
         assert fixed_state.run_id in result.output
 
@@ -230,7 +240,9 @@ class TestRunCommand:
             mock_orch.run = AsyncMock(return_value=final_state)
             mock_orch_cls.return_value = mock_orch
 
-            result = runner.invoke(cli, ["run", "--config", str(config_file)])
+            result = runner.invoke(
+                cli, ["run", "--config", str(config_file), "--no-tui"]
+            )
 
         assert "Disk full" in result.output or "Git error" in result.output
 

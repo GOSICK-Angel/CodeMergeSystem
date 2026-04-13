@@ -1,29 +1,56 @@
 from src.models.plan import MergePlan
 from src.models.diff import FileDiff
-from src.models.plan_judge import PlanIssue
 
 
-PLANNER_JUDGE_SYSTEM = """You are an independent reviewer of code merge plans. Your task is to find
+_PLANNER_JUDGE_SYSTEM_BASE = """You are an independent reviewer of code merge plans. Your task is to find
 risks that may be underestimated in the plan, incorrect file classifications, missing security-sensitive files,
 and batch granularity issues.
 You do not know the Planner's reasoning process; you only see the final plan and the raw diff, and draw independent conclusions.
 When you find issues, you must point out specific file paths and specific reasons. Vague descriptions are not allowed.
-Be critical and thorough."""
+Be critical and thorough.
+
+IMPORTANT: You MUST respond with ONLY a single JSON object. No markdown, no explanations, no text before or after the JSON.
+Your entire response must be valid JSON that can be parsed by json.loads()."""
+
+_PLANNER_JUDGE_SYSTEM_ZH_SUFFIX = """
+
+语言要求（最高优先级）：
+- "summary" 字段必须使用中文撰写。
+- 每个 issue 的 "reason" 字段必须使用中文撰写。
+- 禁止在这两个字段中使用英文句子，技术术语（如文件路径、枚举值）除外。"""
 
 
-def build_plan_review_prompt(plan: MergePlan, file_diffs: list[FileDiff]) -> str:
+def get_planner_judge_system(lang: str = "en") -> str:
+    if lang == "zh":
+        return _PLANNER_JUDGE_SYSTEM_BASE + _PLANNER_JUDGE_SYSTEM_ZH_SUFFIX
+    return _PLANNER_JUDGE_SYSTEM_BASE
+
+
+def _build_file_manifest(file_diffs: list[FileDiff]) -> str:
+    """Compact one-line-per-file manifest: path + classification + flags."""
+    lines: list[str] = []
+    for fd in file_diffs:
+        flags: list[str] = []
+        if fd.is_security_sensitive:
+            flags.append("SEC")
+        if fd.conflict_count > 0:
+            flags.append(f"conflicts={fd.conflict_count}")
+        if fd.lines_added + fd.lines_deleted > 100:
+            flags.append(f"+{fd.lines_added}/-{fd.lines_deleted}")
+        flag_str = f" [{', '.join(flags)}]" if flags else ""
+        lines.append(f"  {fd.file_path}: {fd.risk_level.value}{flag_str}")
+    return "\n".join(lines)
+
+
+def build_plan_review_prompt(
+    plan: MergePlan, file_diffs: list[FileDiff], lang: str = "en"
+) -> str:
     phases_summary = "\n".join(
         f"  Phase {batch.phase.value}: {len(batch.file_paths)} files ({batch.risk_level.value})"
         for batch in plan.phases
     )
 
-    diff_summary_lines = [
-        f"- {fd.file_path}: {fd.file_status.value}, "
-        f"lines_added={fd.lines_added}, lines_deleted={fd.lines_deleted}, "
-        f"conflicts={fd.conflict_count}, security={fd.is_security_sensitive}"
-        for fd in file_diffs
-    ]
-    diff_summary = "\n".join(diff_summary_lines)
+    manifest = _build_file_manifest(file_diffs)
 
     return f"""Review the following merge plan for quality and correctness.
 
@@ -38,8 +65,8 @@ def build_plan_review_prompt(plan: MergePlan, file_diffs: list[FileDiff]) -> str
 ## Phase Breakdown
 {phases_summary}
 
-## All File Diffs
-{diff_summary}
+## All Files (path: classification [flags])
+{manifest}
 
 ## Your Review Tasks
 1. Check if any security-sensitive files are incorrectly classified as auto_safe
@@ -64,16 +91,6 @@ Return JSON with:
   "summary": "Overall assessment"
 }}
 
-CRITICAL: Each issue MUST reference a SINGLE file_path. The "current_classification" and "suggested_classification" fields MUST be exactly one of the enum values listed above — do NOT combine multiple values or add free text."""
-
-
-def build_issue_report_prompt(issues: list[PlanIssue]) -> str:
-    issues_text = "\n".join(
-        f"- {issue.file_path}: {issue.reason} (type={issue.issue_type})"
-        for issue in issues
-    )
-    return f"""The following plan issues have been identified:
-
-{issues_text}
-
-Provide a concise summary of the impact of these issues on the merge process."""
+CRITICAL: Each issue MUST reference a SINGLE file_path. The "current_classification" and "suggested_classification" fields MUST be exactly one of the enum values listed above — do NOT combine multiple values or add free text.
+{"⚠️ 语言要求：'summary' 和每个 issue 的 'reason' 字段必须使用中文撰写，禁止使用英文句子（技术术语如文件路径、枚举值除外）。" if lang == "zh" else ""}
+Respond with ONLY the JSON object. No other text."""

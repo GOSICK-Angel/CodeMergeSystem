@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from src.models.config import MergeConfig
@@ -37,6 +39,7 @@ from src.tools.report_writer import (
     write_plan_review_report,
     write_living_plan_report,
 )
+from src.tools.merge_plan_report import write_merge_plan_report
 from src.tools.trace_logger import TraceLogger
 from src.models.plan_review import PlanReviewRound, PlanHumanDecision
 from src.models.conflict import ConflictAnalysis
@@ -53,6 +56,8 @@ logger = logging.getLogger(__name__)
 
 
 class Orchestrator:
+    OnActivityCallback = Callable[[str, str], None]
+
     def __init__(self, config: MergeConfig):
         self.config = config
         git_tool = GitTool(config.repo_path)
@@ -74,6 +79,7 @@ class Orchestrator:
         self.phase_runner = PhaseRunner(batch_size=10, max_concurrency=5)
         self._log_handler: logging.FileHandler | None = None
         self._trace_logger: TraceLogger | None = None
+        self._on_activity: Orchestrator.OnActivityCallback | None = None
 
         self._all_agents = [
             self.planner,
@@ -85,6 +91,13 @@ class Orchestrator:
         ]
         self._memory_store = MemoryStore()
         self._summarizer = PhaseSummarizer()
+
+    def set_activity_callback(self, cb: OnActivityCallback) -> None:
+        self._on_activity = cb
+
+    def _emit(self, agent: str, action: str) -> None:
+        if self._on_activity:
+            self._on_activity(agent, action)
 
     def _setup_run_logger(self, run_id: str) -> Path:
         debug_dir = Path(self.config.output.debug_directory)
@@ -140,45 +153,56 @@ class Orchestrator:
         try:
             if state.status == SystemStatus.INITIALIZED:
                 t0 = time.monotonic()
+                self._emit("orchestrator", "Initializing — collecting file diffs")
                 await self._initialize(state)
+                n_files = len(getattr(state, "_file_diffs", []) or [])
+                self._emit("orchestrator", f"Init done — {n_files} files collected")
                 logger.info(
                     "Phase INITIALIZE completed in %.1fs — %d files collected",
                     time.monotonic() - t0,
-                    len(getattr(state, "_file_diffs", []) or []),
+                    n_files,
                 )
 
             if state.status == SystemStatus.PLANNING:
                 t0 = time.monotonic()
+                self._emit("planner", "Generating merge plan")
                 await self._run_phase1(state)
                 self._update_memory("planning", state)
                 self._inject_memory()
                 self.checkpoint.save(state, "after_phase1")
+                self._emit("planner", "Plan generated")
                 logger.info("Phase PLANNING completed in %.1fs", time.monotonic() - t0)
 
             if state.status == SystemStatus.PLAN_REVIEWING:
                 t0 = time.monotonic()
+                self._emit("planner_judge", "Reviewing merge plan")
                 await self._run_phase1_5(state)
                 self.checkpoint.save(state, "after_phase1_5")
+                self._emit("planner_judge", "Plan review done")
                 logger.info(
                     "Phase PLAN_REVIEW completed in %.1fs", time.monotonic() - t0
                 )
 
             if state.status == SystemStatus.AUTO_MERGING:
                 t0 = time.monotonic()
+                self._emit("executor", "Auto-merging safe files")
                 await self._run_phase2(state)
                 self._update_memory("auto_merge", state)
                 self._inject_memory()
                 self.checkpoint.save(state, "after_phase2")
+                self._emit("executor", "Auto-merge done")
                 logger.info(
                     "Phase AUTO_MERGE completed in %.1fs", time.monotonic() - t0
                 )
 
             if state.status == SystemStatus.ANALYZING_CONFLICTS:
                 t0 = time.monotonic()
+                self._emit("conflict_analyst", "Analyzing conflicts")
                 await self._run_phase3(state)
                 self._update_memory("conflict_analysis", state)
                 self._inject_memory()
                 self.checkpoint.save(state, "after_phase3")
+                self._emit("conflict_analyst", "Conflict analysis done")
                 logger.info(
                     "Phase CONFLICT_ANALYSIS completed in %.1fs",
                     time.monotonic() - t0,
@@ -186,6 +210,21 @@ class Orchestrator:
 
             if state.status == SystemStatus.AWAITING_HUMAN:
                 logger.info("Entering AWAITING_HUMAN status")
+                if state.plan_human_review is None and state.merge_plan:
+                    self._emit("orchestrator", "Generating merge plan report")
+                    report_path = write_merge_plan_report(state)
+                    state.messages.append(
+                        {
+                            "type": "plan_report",
+                            "from": "orchestrator",
+                            "to": "human",
+                            "content": str(report_path),
+                        }
+                    )
+                    self._emit(
+                        "orchestrator",
+                        f"Plan report: {report_path}",
+                    )
                 if state.plan_human_review is not None:
                     write_plan_review_report(state, self.config.output.directory)
                     if state.plan_human_review.decision == PlanHumanDecision.APPROVE:
@@ -211,17 +250,21 @@ class Orchestrator:
 
             if state.status == SystemStatus.JUDGE_REVIEWING:
                 t0 = time.monotonic()
+                self._emit("judge", "Reviewing merge quality")
                 await self._run_phase5(state)
                 self._update_memory("judge_review", state)
                 self.checkpoint.save(state, "after_phase5")
+                self._emit("judge", "Judge review done")
                 logger.info(
                     "Phase JUDGE_REVIEW completed in %.1fs", time.monotonic() - t0
                 )
 
             if state.status == SystemStatus.GENERATING_REPORT:
                 t0 = time.monotonic()
+                self._emit("orchestrator", "Generating report")
                 await self._run_phase6(state)
                 self.checkpoint.save(state, "completed")
+                self._emit("orchestrator", "Report generated")
                 logger.info("Phase REPORT completed in %.1fs", time.monotonic() - t0)
 
         except Exception as e:
@@ -259,12 +302,17 @@ class Orchestrator:
         self._teardown_run_logger()
 
     async def _initialize(self, state: MergeState) -> None:
+        await asyncio.to_thread(self._initialize_sync, state)
+
+    def _initialize_sync(self, state: MergeState) -> None:
+        self._emit("orchestrator", "Computing merge base")
         merge_base = self.git_tool.get_merge_base(
             state.config.upstream_ref, state.config.fork_ref
         )
         object.__setattr__(state, "_merge_base", merge_base)
         state.merge_base_commit = merge_base
 
+        self._emit("orchestrator", "Classifying files (three-way)")
         file_categories = classify_all_files(
             merge_base,
             state.config.fork_ref,
@@ -272,6 +320,7 @@ class Orchestrator:
             self.git_tool,
         )
 
+        self._emit("orchestrator", f"Classified {len(file_categories)} files")
         auditor = PollutionAuditor(self.git_tool)
         pollution_report = auditor.audit(
             merge_base,
@@ -312,6 +361,10 @@ class Orchestrator:
             fp for fp, cat in file_categories.items() if cat in actionable_categories
         }
 
+        self._emit(
+            "orchestrator",
+            f"Building diffs for {len(actionable_paths)} actionable files",
+        )
         changed_files = self.git_tool.get_changed_files(
             merge_base, state.config.fork_ref
         )
@@ -410,7 +463,10 @@ class Orchestrator:
 
             assert state.merge_plan is not None
             verdict = await self.planner_judge.review_plan(
-                state.merge_plan, file_diffs, round_num
+                state.merge_plan,
+                file_diffs,
+                round_num,
+                lang=self.config.output.language,
             )
             state.plan_judge_verdict = verdict
 
@@ -434,6 +490,30 @@ class Orchestrator:
                 ],
             )
 
+            is_llm_failure = (
+                len(verdict.issues) == 0
+                and verdict.summary
+                and "parse failed" in verdict.summary.lower()
+            )
+            if is_llm_failure:
+                state.plan_review_log.append(round_log)
+                phase_result = phase_result.model_copy(
+                    update={"status": "completed", "completed_at": datetime.now()}
+                )
+                state.phase_results[MergePhase.PLAN_REVIEW.value] = phase_result
+                write_plan_review_report(state, self.config.output.directory)
+                logger.warning(
+                    "Plan judge LLM call failed (round %d) — "
+                    "skipping review, proceeding with current plan",
+                    round_num,
+                )
+                self.state_machine.transition(
+                    state,
+                    SystemStatus.AWAITING_HUMAN,
+                    "plan judge LLM unavailable, proceeding with current plan",
+                )
+                return
+
             if verdict.result == PlanJudgeResult.APPROVED:
                 state.plan_review_log.append(round_log)
                 phase_result = phase_result.model_copy(
@@ -441,13 +521,11 @@ class Orchestrator:
                 )
                 state.phase_results[MergePhase.PLAN_REVIEW.value] = phase_result
                 write_plan_review_report(state, self.config.output.directory)
-                logger.info(
-                    "Plan approved by judge — awaiting human review before proceeding"
-                )
+                logger.info("Plan approved by judge — proceeding to auto-merge")
                 self.state_machine.transition(
                     state,
                     SystemStatus.AWAITING_HUMAN,
-                    "plan approved by judge, awaiting human review",
+                    "plan approved by judge",
                 )
                 return
 
@@ -492,10 +570,15 @@ class Orchestrator:
                 )
                 state.phase_results[MergePhase.PLAN_REVIEW.value] = phase_result
                 write_plan_review_report(state, self.config.output.directory)
+                logger.warning(
+                    "Plan review did not converge after %d rounds — "
+                    "proceeding with last revised plan",
+                    self.config.max_plan_revision_rounds,
+                )
                 self.state_machine.transition(
                     state,
                     SystemStatus.AWAITING_HUMAN,
-                    "plan review exceeded max revision rounds",
+                    f"plan review did not converge after {self.config.max_plan_revision_rounds} rounds, proceeding with last plan",
                 )
                 return
 
@@ -1054,7 +1137,9 @@ class Orchestrator:
                 state, SystemStatus.PLAN_REVIEWING, "dispute revision complete"
             )
 
-            verdict = await self.planner_judge.review_plan(revised_plan, file_diffs, 0)
+            verdict = await self.planner_judge.review_plan(
+                revised_plan, file_diffs, 0, lang=self.config.output.language
+            )
             state.plan_judge_verdict = verdict
 
             if verdict.result == PlanJudgeResult.APPROVED:

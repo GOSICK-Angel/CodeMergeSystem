@@ -122,6 +122,24 @@ class GitTool:
         except git.GitCommandError:
             return []
 
+    def list_files_with_hashes(self, ref: str) -> dict[str, str]:
+        """Return {file_path: blob_hash} for all files at *ref* in one call."""
+        try:
+            output = self.repo.git.ls_tree("-r", ref)
+        except git.GitCommandError:
+            return {}
+        result: dict[str, str] = {}
+        for line in output.splitlines():
+            if not line:
+                continue
+            parts = line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            meta, path = parts
+            blob_hash = meta.split()[2]
+            result[path] = blob_hash
+        return result
+
     def file_exists_at_ref(self, ref: str, file_path: str) -> bool:
         return self.get_file_hash(ref, file_path) is not None
 

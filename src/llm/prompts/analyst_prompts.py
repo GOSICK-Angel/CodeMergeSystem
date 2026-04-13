@@ -78,35 +78,3 @@ Return JSON:
   "rationale": "Detailed explanation of the analysis and recommendation",
   "is_security_sensitive": false
 }}"""
-
-
-def build_merge_suggestion_prompt(
-    file_path: str,
-    current_content: str,
-    target_content: str,
-    rationale: str,
-    language: str,
-) -> str:
-    return f"""Generate a merged version of the following code that incorporates changes from both sides.
-
-File: {file_path}
-Language: {language}
-Merge rationale: {rationale}
-
-## Current version (fork)
-```{language}
-{current_content}
-```
-
-## Target version (upstream)
-```{language}
-{target_content}
-```
-
-Produce the best semantic merge that:
-1. Preserves fork's private logic
-2. Incorporates upstream improvements
-3. Has no conflict markers
-4. Is syntactically valid {language}
-
-Return only the merged file content, no explanations."""

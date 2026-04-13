@@ -186,7 +186,7 @@ class MergeConfig(BaseModel):
         description="project background description to help LLM understand code semantics",
     )
     max_files_per_run: int = Field(default=500, ge=1)
-    max_plan_revision_rounds: int = Field(default=2, ge=1, le=5)
+    max_plan_revision_rounds: int = Field(default=5, ge=1, le=20)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     agents: AgentsLLMConfig = Field(default_factory=AgentsLLMConfig)
     thresholds: ThresholdConfig = Field(default_factory=ThresholdConfig)

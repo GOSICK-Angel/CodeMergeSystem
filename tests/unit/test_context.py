@@ -37,7 +37,7 @@ class TestGetContextWindow:
         assert get_context_window("gpt-4o") == 128_000
 
     def test_unknown_model_fallback(self):
-        assert get_context_window("unknown-model-xyz") == 8_000
+        assert get_context_window("unknown-model-xyz") == 128_000
 
     def test_prefix_match(self):
         assert get_context_window("claude-opus-4-6-latest") == 200_000

@@ -15,7 +15,7 @@ for (let i = 0; i < args.length; i++) {
 const wsUrl = `ws://localhost:${wsPort}`;
 
 const { waitUntilExit } = render(<App wsUrl={wsUrl} />, {
-  patchConsole: true,
+  patchConsole: false,
 });
 
 waitUntilExit().then(() => {

@@ -9,6 +9,19 @@ interface WSCallbacks {
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+const THROTTLE_MS = 200;
+let pendingSnapshot: Record<string, unknown> | null = null;
+let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushPendingSnapshot() {
+  if (pendingSnapshot) {
+    const data = pendingSnapshot;
+    pendingSnapshot = null;
+    useAppStore.getState().applySnapshot(data);
+  }
+  throttleTimer = null;
+}
+
 export function connectWS(url: string, callbacks: WSCallbacks): () => void {
   const store = useAppStore.getState;
 
@@ -49,13 +62,14 @@ export function connectWS(url: string, callbacks: WSCallbacks): () => void {
   }
 
   function handleMessage(msg: { type: string; payload?: unknown }) {
-    const { applySnapshot, applyPatch, setAgentActivity } = useAppStore.getState();
+    const { applyPatch, setAgentActivity } = useAppStore.getState();
     switch (msg.type) {
       case "state_snapshot":
-        applySnapshot(msg.payload as Record<string, unknown>);
-        break;
       case "state_patch":
-        applyPatch(msg.payload as Record<string, unknown>);
+        pendingSnapshot = msg.payload as Record<string, unknown>;
+        if (!throttleTimer) {
+          throttleTimer = setTimeout(flushPendingSnapshot, THROTTLE_MS);
+        }
         break;
       case "agent_activity":
         setAgentActivity(msg.payload as { agent: string; action: string });
@@ -74,6 +88,7 @@ export function connectWS(url: string, callbacks: WSCallbacks): () => void {
 
   return () => {
     if (reconnectTimer) clearTimeout(reconnectTimer);
+    if (throttleTimer) clearTimeout(throttleTimer);
     if (ws) {
       ws.removeAllListeners();
       ws.close();

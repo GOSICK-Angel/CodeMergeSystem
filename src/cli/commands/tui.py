@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -21,21 +22,20 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-def tui_command_impl(config_path: str, ws_port: int, dry_run: bool) -> None:
+def tui_command_impl(config_path: str, ws_port: int, dry_run: bool = False) -> None:
     """Launch the React Ink TUI alongside the merge orchestrator."""
     config_file = Path(config_path)
     raw_config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     merge_config = MergeConfig.model_validate(raw_config)
     state = MergeState(config=merge_config)
 
-    asyncio.run(_run_tui(state, merge_config, ws_port, dry_run))
+    asyncio.run(_run_tui(state, merge_config, ws_port))
 
 
 async def _run_tui(
     state: MergeState,
     config: MergeConfig,
     ws_port: int,
-    dry_run: bool,
 ) -> None:
     bridge = MergeWSBridge(state)
     await bridge.start("localhost", ws_port)
@@ -46,29 +46,63 @@ async def _run_tui(
         bridge.notify_state_change(reason)
 
     orchestrator.state_machine.add_observer(_on_transition)
+    orchestrator.set_activity_callback(bridge.notify_agent_activity)
 
-    tui_proc = _spawn_tui_process(ws_port)
+    tui_stdout_fd = os.dup(sys.stdout.fileno())
+    tui_proc = _spawn_tui_process(ws_port, tui_stdout_fd)
+
+    _mute_python_stdio()
 
     try:
-        if not dry_run:
+        await bridge.wait_for_client(timeout=30.0)
+
+        while True:
             state = await orchestrator.run(state)
             await bridge.broadcast_state_patch()
-        else:
-            logger.info("Dry-run mode: waiting for TUI to exit")
+
+            if state.status.value != "awaiting_human":
+                break
+
+            await bridge.wait_for_plan_review()
+            await bridge.broadcast_state_patch()
 
         if tui_proc and tui_proc.poll() is None:
-            console.print("[green]Merge complete. Press q in the TUI to exit.[/green]")
-            tui_proc.wait()
+            await _wait_proc_async(tui_proc)
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted[/yellow]")
+        pass
     finally:
+        _restore_python_stdio()
         if tui_proc and tui_proc.poll() is None:
             tui_proc.terminate()
-            tui_proc.wait(timeout=5)
+            try:
+                await asyncio.wait_for(_wait_proc_async(tui_proc), timeout=5)
+            except asyncio.TimeoutError:
+                tui_proc.kill()
         await bridge.stop()
+        os.close(tui_stdout_fd)
 
 
-def _spawn_tui_process(ws_port: int) -> subprocess.Popen[bytes] | None:
+async def _wait_proc_async(proc: subprocess.Popen[bytes]) -> int:
+    """Wait for subprocess without blocking the event loop."""
+    while proc.poll() is None:
+        await asyncio.sleep(0.1)
+    return proc.returncode
+
+
+def _mute_python_stdio() -> None:
+    """Redirect Python stdout/stderr to devnull so prints don't corrupt Ink."""
+    devnull = open(os.devnull, "w")
+    sys.stdout = devnull
+    sys.stderr = devnull
+
+
+def _restore_python_stdio() -> None:
+    """Restore original stdout/stderr after TUI exits."""
+    sys.stdout = sys.__stdout__
+    sys.stderr = sys.__stderr__
+
+
+def _spawn_tui_process(ws_port: int, stdout_fd: int) -> subprocess.Popen[bytes] | None:
     tui_dir = Path(__file__).resolve().parents[3] / "tui"
     entry_point = tui_dir / "src" / "index.tsx"
 
@@ -89,8 +123,8 @@ def _spawn_tui_process(ws_port: int) -> subprocess.Popen[bytes] | None:
             [npx, "tsx", str(entry_point), "--ws-port", str(ws_port)],
             cwd=str(tui_dir),
             stdin=sys.stdin,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
+            stdout=stdout_fd,
+            stderr=subprocess.DEVNULL,
         )
         return proc
     except FileNotFoundError:

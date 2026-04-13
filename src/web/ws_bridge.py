@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 class MergeWSBridge:
     """Bridges MergeState changes to WebSocket TUI clients."""
 
+    DEBOUNCE_SECONDS = 0.3
+
     def __init__(self, state: MergeState) -> None:
         self._state = state
         self._clients: set[ServerConnection] = set()
@@ -28,8 +30,14 @@ class MergeWSBridge:
         self._last_status: str = (
             state.status.value if hasattr(state.status, "value") else str(state.status)
         )
+        self._debounce_handle: asyncio.TimerHandle | None = None
+        self._pending_broadcast: bool = False
+        self._client_connected: asyncio.Event = asyncio.Event()
+        self._plan_review_received: asyncio.Event = asyncio.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self, host: str = "localhost", port: int = 8765) -> None:
+        self._loop = asyncio.get_running_loop()
         self._server = await websockets.serve(
             self._handler,
             host,
@@ -42,8 +50,22 @@ class MergeWSBridge:
             self._server.close()
             await self._server.wait_closed()
 
+    async def wait_for_client(self, timeout: float = 30.0) -> bool:
+        """Block until at least one TUI client connects."""
+        try:
+            await asyncio.wait_for(self._client_connected.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def wait_for_plan_review(self) -> None:
+        """Block until a plan review decision arrives from the TUI."""
+        await self._plan_review_received.wait()
+        self._plan_review_received.clear()
+
     async def _handler(self, ws: ServerConnection) -> None:
         self._clients.add(ws)
+        self._client_connected.set()
         logger.info("TUI client connected (%d total)", len(self._clients))
         try:
             await self._send_snapshot(ws)
@@ -339,6 +361,7 @@ class MergeWSBridge:
             reviewer_name="tui_user",
             decided_at=datetime.now(),
         )
+        self._plan_review_received.set()
         logger.info("TUI plan review decision: %s", decision)
 
     async def broadcast_state_patch(self) -> None:
@@ -358,29 +381,51 @@ class MergeWSBridge:
         )
 
     def notify_state_change(self, reason: str = "") -> None:
-        """Called by the orchestrator observer hook (sync context).
+        """Called by the orchestrator observer hook (sync or thread context).
 
-        Schedules an async broadcast on the running event loop.
+        Thread-safe: uses call_soon_threadsafe to schedule on the event loop.
+        Debounces broadcasts within a 300ms window.
         """
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self.broadcast_state_patch())
-        except RuntimeError:
-            pass
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+
+        loop.call_soon_threadsafe(self._schedule_debounced_broadcast)
+
+    def _schedule_debounced_broadcast(self) -> None:
+        """Schedule a debounced broadcast (must run on event loop thread)."""
+        self._pending_broadcast = True
+
+        if self._debounce_handle is not None:
+            self._debounce_handle.cancel()
+
+        loop = self._loop
+        if loop is None:
+            return
+
+        self._debounce_handle = loop.call_later(
+            self.DEBOUNCE_SECONDS,
+            self._flush_broadcast,
+        )
+
+    def _flush_broadcast(self) -> None:
+        """Fire the debounced broadcast."""
+        if self._pending_broadcast and self._loop:
+            self._pending_broadcast = False
+            self._loop.create_task(self.broadcast_state_patch())
 
     def notify_agent_activity(self, agent: str, action: str) -> None:
-        """Push agent activity notification to TUI clients."""
-        try:
-            loop = asyncio.get_running_loop()
-            data = json.dumps(
-                {
-                    "type": "agent_activity",
-                    "payload": {"agent": agent, "action": action},
-                }
-            )
-            loop.create_task(self._broadcast_raw(data))
-        except RuntimeError:
-            pass
+        """Push agent activity notification to TUI clients (thread-safe)."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        data = json.dumps(
+            {
+                "type": "agent_activity",
+                "payload": {"agent": agent, "action": action},
+            }
+        )
+        loop.call_soon_threadsafe(loop.create_task, self._broadcast_raw(data))
 
     async def _broadcast_raw(self, data: str) -> None:
         await asyncio.gather(

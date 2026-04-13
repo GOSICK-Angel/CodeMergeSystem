@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Box, useApp, useInput } from "ink";
 import { ThemeProvider } from "./context/ThemeContext.js";
 import { ConnectionProvider } from "./context/ConnectionContext.js";
@@ -9,6 +9,13 @@ import { HelpOverlay } from "./components/HelpOverlay.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { useAppStore } from "./state/store.js";
 import { connectWS } from "./state/ws-client.js";
+import type { ScreenId } from "./state/types.js";
+
+const STATUS_SCREEN_MAP: Record<string, ScreenId> = {
+  plan_reviewing: "plan_review",
+  completed: "report",
+  failed: "report",
+};
 
 interface AppProps {
   wsUrl: string;
@@ -17,7 +24,27 @@ interface AppProps {
 export function App({ wsUrl }: AppProps) {
   const { exit } = useApp();
   const setConnectionStatus = useAppStore((s) => s.setConnectionStatus);
+  const setActiveScreen = useAppStore((s) => s.setActiveScreen);
+  const status = useAppStore((s) => s.status);
+  const prevStatus = useRef(status);
   const [showHelp, setShowHelp] = useState(false);
+
+  const hasDecisionRequests =
+    Object.keys(useAppStore((s) => s.humanDecisionRequests)).length > 0;
+
+  useEffect(() => {
+    if (status !== prevStatus.current) {
+      prevStatus.current = status;
+      if (status === "awaiting_human") {
+        setActiveScreen(hasDecisionRequests ? "decisions" : "plan_review");
+      } else {
+        const target = STATUS_SCREEN_MAP[status];
+        if (target) {
+          setActiveScreen(target);
+        }
+      }
+    }
+  }, [status, hasDecisionRequests, setActiveScreen]);
 
   useEffect(() => {
     const cleanup = connectWS(wsUrl, {

@@ -62,10 +62,44 @@ def _validate_enum(value: str, enum_class: Any, field_name: str) -> str:
     )
 
 
+def _normalize_plan_judge_json(data: dict[str, Any]) -> dict[str, Any]:
+    """Map non-standard LLM output keys to the expected schema."""
+    if "result" not in data:
+        quality = str(data.get("quality", data.get("verdict", ""))).lower()
+        has_issues = bool(data.get("issues"))
+        if quality in ("poor", "questionable", "bad", "critical"):
+            data["result"] = "revision_needed"
+        elif quality in ("good", "excellent", "acceptable"):
+            data["result"] = "approved"
+        elif has_issues:
+            data["result"] = "revision_needed"
+        else:
+            data["result"] = "approved"
+
+    if "summary" not in data:
+        data["summary"] = data.get(
+            "overall_assessment",
+            data.get("assessment", data.get("correctness", "")),
+        )
+
+    for issue in data.get("issues", []):
+        if "file_path" not in issue and "file" in issue:
+            issue["file_path"] = issue["file"]
+        if "issue_type" not in issue and "type" in issue:
+            issue["issue_type"] = issue["type"]
+        if "current_classification" not in issue:
+            issue["current_classification"] = "auto_safe"
+        if "suggested_classification" not in issue:
+            issue["suggested_classification"] = "human_required"
+
+    return data
+
+
 def parse_plan_judge_verdict(
     raw: str | dict[str, Any], judge_model: str = "unknown", revision_round: int = 0
 ) -> PlanJudgeVerdict:
     data = _extract_json(raw)
+    data = _normalize_plan_judge_json(data)
 
     result_raw = data.get("result", "")
     _validate_enum(result_raw, PlanJudgeResult, "result")

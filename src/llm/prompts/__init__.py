@@ -4,7 +4,7 @@ from src.llm.prompts.planner_prompts import (
     build_revision_prompt,
 )
 from src.llm.prompts.planner_judge_prompts import (
-    PLANNER_JUDGE_SYSTEM,
+    get_planner_judge_system,
     build_plan_review_prompt,
 )
 from src.llm.prompts.analyst_prompts import (
@@ -21,7 +21,7 @@ __all__ = [
     "PLANNER_SYSTEM",
     "build_classification_prompt",
     "build_revision_prompt",
-    "PLANNER_JUDGE_SYSTEM",
+    "get_planner_judge_system",
     "build_plan_review_prompt",
     "ANALYST_SYSTEM",
     "build_conflict_analysis_prompt",
