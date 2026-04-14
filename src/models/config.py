@@ -25,6 +25,11 @@ class AgentLLMConfig(BaseModel):
         description="Prompt caching strategy (Anthropic only). "
         "Ignored for OpenAI providers.",
     )
+    cheap_model: str | None = Field(
+        default=None,
+        description="Optional cheaper model for trivial tasks (D1 smart routing). "
+        "Set to e.g. 'claude-haiku-4-5-20251001' to auto-route simple queries.",
+    )
     compression: CompressionConfig = Field(default_factory=CompressionConfig)
 
     @property

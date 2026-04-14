@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from abc import ABC, abstractmethod
 from typing import Any
@@ -14,6 +16,8 @@ class ParseError(Exception):
 
 
 class LLMClient(ABC):
+    model: str
+
     @abstractmethod
     async def complete(
         self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
@@ -31,6 +35,27 @@ class LLMClient(ABC):
 
     def update_api_key(self, new_key: str) -> None:
         """Replace the API key used by this client (C2 credential rotation)."""
+
+    def with_model(self, model: str) -> _ModelOverrideContext:
+        """Context manager to temporarily override the model (D1 smart routing)."""
+        return _ModelOverrideContext(self, model)
+
+
+class _ModelOverrideContext:
+    """Temporarily swaps ``client.model`` and restores it on exit."""
+
+    def __init__(self, client: LLMClient, model: str) -> None:
+        self._client = client
+        self._new_model = model
+        self._old_model = ""
+
+    def __enter__(self) -> LLMClient:
+        self._old_model = self._client.model
+        self._client.model = self._new_model
+        return self._client
+
+    def __exit__(self, *exc: Any) -> None:
+        self._client.model = self._old_model
 
 
 class AnthropicClient(LLMClient):

@@ -17,6 +17,7 @@ from src.llm.context import (
 from src.llm.context_compressor import ContextCompressor
 from src.llm.error_classifier import ClassifiedError, ErrorCategory, classify_error
 from src.llm.credential_pool import CredentialPool
+from src.llm.model_router import select_model
 from src.llm.retry_utils import jittered_backoff
 from src.memory.layered_loader import LayeredMemoryLoader
 from src.memory.store import MemoryStore
@@ -279,10 +280,15 @@ class BaseAgent(ABC):
             estimated_tokens / budget.context_window if budget.context_window else 0.0
         )
 
+        routed_model = select_model(messages, self.llm_config)
+        model_override = self.llm.with_model(routed_model)
+        model_override.__enter__()
+
         self.logger.info(
-            "LLM call: model=%s, provider=%s, prompt_chars=%d, est_tokens=%d, "
+            "LLM call: model=%s (routed=%s), provider=%s, prompt_chars=%d, est_tokens=%d, "
             "max_tokens=%d, utilization=%.1f%%",
             self.llm_config.model,
+            routed_model,
             self.llm_config.provider,
             prompt_chars,
             estimated_tokens,
@@ -321,7 +327,7 @@ class BaseAgent(ABC):
                 if self._trace_logger:
                     self._trace_logger.record(
                         agent=self.agent_type.value,
-                        model=self.llm_config.model,
+                        model=routed_model,
                         provider=self.llm_config.provider,
                         prompt_chars=prompt_chars,
                         response_chars=resp_len,
@@ -340,7 +346,7 @@ class BaseAgent(ABC):
                     self._cost_tracker.record(
                         agent=self.agent_type.value,
                         phase=self._current_phase,
-                        model=self.llm_config.model,
+                        model=routed_model,
                         provider=self.llm_config.provider,
                         usage=TokenUsage(
                             input_tokens=estimated_tokens,
@@ -348,6 +354,7 @@ class BaseAgent(ABC):
                         ),
                         elapsed_seconds=elapsed,
                     )
+                model_override.__exit__(None, None, None)
                 return llm_result
             except Exception as e:
                 last_error = e
@@ -365,7 +372,7 @@ class BaseAgent(ABC):
                 if self._trace_logger:
                     self._trace_logger.record(
                         agent=self.agent_type.value,
-                        model=self.llm_config.model,
+                        model=routed_model,
                         provider=self.llm_config.provider,
                         prompt_chars=prompt_chars,
                         response_chars=0,
@@ -387,6 +394,7 @@ class BaseAgent(ABC):
                             continue
                     if classified.category in _CIRCUIT_BREAKER_CATEGORIES:
                         self._consecutive_failures += 1
+                    model_override.__exit__(None, None, None)
                     raise AgentError(classified.message, classified) from e
 
                 if classified.should_rotate:
@@ -438,6 +446,7 @@ class BaseAgent(ABC):
             ErrorCategory.TRANSPORT,
         ):
             self._consecutive_failures += 1
+        model_override.__exit__(None, None, None)
         raise AgentExhaustedError(
             f"Agent {self.agent_type.value}: LLM call failed after "
             f"{retry_budget.attempt} attempts "
