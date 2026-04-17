@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any
 
 from src.models.state import MergeState
-from src.tools.cost_tracker import CostTracker
 
 
 _I18N: dict[str, dict[str, str]] = {

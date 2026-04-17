@@ -14,6 +14,11 @@ ruff check src/                  # lint
 ruff format src/                 # format
 merge --help                     # CLI entry point
 
+# TUI development (requires Python backend on ws://localhost:8765)
+cd tui && npm run start       # start TUI
+cd tui && npm run dev         # watch mode
+cd tui && npm run build       # TypeScript type check (tsc --noEmit)
+
 # One-stop flow (recommended)
 merge <target-branch>            # interactive TUI — auto-setup on first run
 merge <target-branch> --no-tui  # plain text output
@@ -38,6 +43,8 @@ Each agent reads its API key from its own env var — no key is hardcoded:
 | planner_judge, executor | `OPENAI_API_KEY` |
 
 Run `merge validate --config <path>` to check all vars before running.
+
+Integration tests (`tests/integration/`) require real API keys and are **not run in CI** — execute locally with `pytest tests/integration/ -v`.
 
 ## Architecture Constraints
 
@@ -75,6 +82,14 @@ When run inside a target project (pip-installed), all artifacts are written unde
 ```
 
 API key resolution order: shell env vars → `.merge/.env` → `~/.config/code-merge-system/.env`
+
+## Git Workflow
+
+Branches: `feature/<name>`, `fix/<name>`, `chore/<name>`. PRs squash-merged into `main`.
+
+## Testing Notes
+
+`asyncio_mode = "auto"` is set globally — all async test functions run without explicit `@pytest.mark.asyncio`. Integration tests mock LLM calls via `patch_llm_factory` fixture; avoid real API calls in unit tests.
 
 ## Code Style
 

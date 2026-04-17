@@ -6,9 +6,10 @@ import logging
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from src.cli.paths import get_plans_dir
-from src.models.diff import FileChangeCategory, RiskLevel
+from src.models.diff import FileDiff, RiskLevel
 from src.models.state import MergeState
 
 logger = logging.getLogger(__name__)
@@ -79,7 +80,6 @@ def _header(lines: list[str], state: MergeState, zh: bool) -> None:
     if plan:
         rs = plan.risk_summary
         total = rs.total_files
-        auto = rs.auto_safe_count + rs.auto_risky_count
         rate_label = "自动合并率" if zh else "Auto-merge rate"
         lines += [
             "",
@@ -252,7 +252,7 @@ def _directory_matrix(lines: list[str], state: MergeState, zh: bool) -> None:
     lines += ["", "---", ""]
 
 
-def _risk_files(lines: list[str], file_diffs: list, zh: bool) -> None:
+def _risk_files(lines: list[str], file_diffs: list[FileDiff], zh: bool) -> None:
     risky = [
         fd
         for fd in file_diffs
@@ -288,7 +288,7 @@ def _risk_files(lines: list[str], file_diffs: list, zh: bool) -> None:
     lines += ["", "---", ""]
 
 
-def _batch_plan(lines: list[str], plan, zh: bool) -> None:
+def _batch_plan(lines: list[str], plan: Any, zh: bool) -> None:
     if not plan:
         return
 
@@ -325,7 +325,7 @@ def _batch_plan(lines: list[str], plan, zh: bool) -> None:
     lines += ["---", ""]
 
 
-def _layer_dependencies(lines: list[str], plan, zh: bool) -> None:
+def _layer_dependencies(lines: list[str], plan: Any, zh: bool) -> None:
     if not plan or not plan.layers:
         return
 

@@ -97,6 +97,28 @@ class ThreeWayDiff:
             if re.search(r"TODO\s*\[check\]", line)
         ]
 
+    def extract_missing_top_level_invocations(
+        self, file_path: str, merge_base: str, upstream_ref: str
+    ) -> list[str]:
+        """Return top-level invocations / decorators present in base∪upstream but
+        absent from HEAD merged content.
+
+        Detection targets (language-agnostic regex fallback):
+          - Top-level call expressions: ``foo.bar(...)``
+          - Decorators / annotations:    ``@app.route(...)``
+        """
+        base = self.git_tool.get_file_content(merge_base, file_path) or ""
+        upstream = self.git_tool.get_file_content(upstream_ref, file_path) or ""
+        abs_path = self.git_tool.repo_path / file_path
+        merged = abs_path.read_text(encoding="utf-8") if abs_path.exists() else ""
+
+        expected = _extract_top_level_invocations(
+            base
+        ) | _extract_top_level_invocations(upstream)
+        actual = _extract_top_level_invocations(merged)
+
+        return sorted(expected - actual)
+
 
 _SYMBOL_PATTERNS = [
     re.compile(r"^(?:async\s+)?def\s+(\w+)\s*\(", re.MULTILINE),
@@ -115,3 +137,57 @@ def _extract_symbols(content: str) -> set[str]:
         for match in pattern.finditer(content):
             symbols.add(match.group(1))
     return symbols
+
+
+_TOP_LEVEL_CALL = re.compile(
+    r"^(?P<call>\w+(?:\.\w+)*)\s*\([^)\n]*\)\s*;?\s*$",
+    re.MULTILINE,
+)
+_TOP_LEVEL_DECORATOR = re.compile(
+    r"^\s*@(?P<name>\w+(?:\.\w+)*)\s*(?:\([^)\n]*\))?\s*$",
+    re.MULTILINE,
+)
+
+_NON_INVOCATION_HEADS = frozenset(
+    {
+        "if",
+        "elif",
+        "while",
+        "for",
+        "switch",
+        "return",
+        "yield",
+        "await",
+        "raise",
+        "throw",
+        "print",
+        "assert",
+        "not",
+        "and",
+        "or",
+        "in",
+        "is",
+    }
+)
+
+
+def _extract_top_level_invocations(content: str) -> set[str]:
+    """Extract top-level (column-0) call expressions and decorators.
+
+    Heuristic regex fallback — intentionally conservative. Prefer AST-level
+    extraction for P1; this layer only needs to catch the common bug where
+    ``api.add_resource(...)`` / ``@blueprint.route(...)`` vanish after merge.
+    """
+    invocations: set[str] = set()
+
+    for m in _TOP_LEVEL_CALL.finditer(content):
+        name = m.group("call")
+        head = name.split(".", 1)[0]
+        if head in _NON_INVOCATION_HEADS:
+            continue
+        invocations.add(name)
+
+    for m in _TOP_LEVEL_DECORATOR.finditer(content):
+        invocations.add("@" + m.group("name"))
+
+    return invocations

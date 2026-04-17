@@ -23,6 +23,8 @@ from src.tools.pollution_auditor import PollutionAuditor
 from src.tools.config_drift_detector import ConfigDriftDetector
 from src.tools.commit_replayer import CommitReplayer
 from src.tools.sync_point_detector import SyncPointDetector
+from src.tools.interface_change_extractor import InterfaceChangeExtractor
+from src.tools.reverse_impact_scanner import ReverseImpactScanner
 
 logger = logging.getLogger(__name__)
 
@@ -213,3 +215,65 @@ class InitializePhase(Phase):
                     drift_report.drift_count,
                     drift_report.total_keys_checked,
                 )
+
+        if state.config.reverse_impact.enabled:
+            self._run_reverse_impact(state, ctx, merge_base)
+
+    def _run_reverse_impact(
+        self, state: MergeState, ctx: PhaseContext, merge_base: str
+    ) -> None:
+        """P1-1 Phase 0.5: extract upstream interface changes and scan
+        fork-only files for dangling references."""
+        ctx.notify("orchestrator", "Extracting upstream interface changes")
+
+        upstream_ref = state.config.upstream_ref
+        changed_files = {
+            fp
+            for fp, cat in state.file_categories.items()
+            if cat in (FileChangeCategory.B, FileChangeCategory.C)
+        }
+        if not changed_files:
+            return
+
+        extractor = InterfaceChangeExtractor()
+        pairs: list[tuple[str, str | None, str | None]] = []
+        for fp in sorted(changed_files):
+            base_content = ctx.git_tool.get_file_content(merge_base, fp)
+            upstream_content = ctx.git_tool.get_file_content(upstream_ref, fp)
+            pairs.append((fp, base_content, upstream_content))
+
+        interface_changes = extractor.extract_from_paths(pairs)
+        state.interface_changes = interface_changes
+        if not interface_changes:
+            logger.info("Phase 0.5: no upstream interface changes detected")
+            return
+
+        logger.info(
+            "Phase 0.5: %d upstream interface changes extracted across %d files",
+            len(interface_changes),
+            len({c.file_path for c in interface_changes}),
+        )
+
+        fork_only = {
+            fp
+            for fp, cat in state.file_categories.items()
+            if cat == FileChangeCategory.D_EXTRA
+        }
+        for entry in state.config.customizations:
+            fork_only.update(entry.files)
+
+        scanner = ReverseImpactScanner(
+            repo_path=Path(state.config.repo_path).resolve(),
+            max_files_per_symbol=state.config.reverse_impact.max_files_per_symbol,
+        )
+        reverse_impacts = scanner.scan(
+            interface_changes,
+            fork_only_files=fork_only,
+            extra_globs=state.config.reverse_impact.extra_scan_globs,
+        )
+        state.reverse_impacts = reverse_impacts
+        if reverse_impacts:
+            logger.warning(
+                "Phase 0.5: %d upstream symbols still referenced in fork-only scope",
+                len(reverse_impacts),
+            )

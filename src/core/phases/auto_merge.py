@@ -85,7 +85,7 @@ class AutoMergePhase(Phase):
 
                 category = batch.change_category
                 if category is None:
-                    fd = file_diffs_map.get(file_path)
+                    fd = file_diffs_map.get(file_path)  # type: ignore[assignment]
                     category = fd.change_category if fd else None
 
                 if category == FileChangeCategory.D_MISSING:
@@ -95,9 +95,10 @@ class AutoMergePhase(Phase):
                     batch_count += 1
                     continue
 
-                fd = file_diffs_map.get(file_path)
-                if fd is None:
+                fd_item: FileDiff | None = file_diffs_map.get(file_path)
+                if fd_item is None:
                     continue
+                fd = fd_item
 
                 strategy = executor._select_strategy_by_category(
                     category, batch.risk_level
@@ -210,7 +211,6 @@ class AutoMergePhase(Phase):
         ctx: PhaseContext,
         dispute: PlanDisputeRequest,
     ) -> None:
-        from src.models.diff import FileDiff
         from src.models.plan_judge import PlanJudgeResult
 
         planner = ctx.agents["planner"]

@@ -27,6 +27,9 @@ if TYPE_CHECKING:
     from src.tools.config_drift_detector import ConfigDriftReport
     from src.tools.pollution_auditor import PollutionAuditReport
     from src.tools.sync_point_detector import SyncPointResult
+    from src.tools.shadow_conflict_detector import ShadowConflict
+    from src.tools.interface_change_extractor import InterfaceChange
+    from src.models.smoke import SmokeTestReport
 
 
 class SystemStatus(str, Enum):
@@ -106,6 +109,23 @@ class MergeState(BaseModel):
         default=None,
         description="ConfigDriftReport from drift detection",
     )
+    shadow_conflicts: list[ShadowConflict] = Field(
+        default_factory=list,
+        description="P0-2: shadow-path conflicts detected pre-Planner.",
+    )
+    interface_changes: list[InterfaceChange] = Field(
+        default_factory=list,
+        description="P1-1: upstream interface changes (signature / base / enum / module).",
+    )
+    reverse_impacts: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="P1-1: symbol -> list of fork-only files that still reference it.",
+    )
+    smoke_test_report: SmokeTestReport | None = Field(
+        default=None,
+        description="P1-3: post-judge smoke test report.",
+    )
+    consecutive_smoke_failures: int = 0
 
     memory: MergeMemory = Field(default_factory=MergeMemory)
     dependency_graph: FileDependencyGraph = Field(default_factory=FileDependencyGraph)
@@ -133,12 +153,18 @@ def _rebuild_state_model() -> None:
     from src.tools.config_drift_detector import ConfigDriftReport
     from src.tools.pollution_auditor import PollutionAuditReport
     from src.tools.sync_point_detector import SyncPointResult
+    from src.tools.shadow_conflict_detector import ShadowConflict
+    from src.tools.interface_change_extractor import InterfaceChange
+    from src.models.smoke import SmokeTestReport
 
     MergeState.model_rebuild(
         _types_namespace={
             "ConfigDriftReport": ConfigDriftReport,
             "PollutionAuditReport": PollutionAuditReport,
             "SyncPointResult": SyncPointResult,
+            "ShadowConflict": ShadowConflict,
+            "InterfaceChange": InterfaceChange,
+            "SmokeTestReport": SmokeTestReport,
         }
     )
 

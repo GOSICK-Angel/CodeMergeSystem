@@ -56,7 +56,25 @@ VETO_CONDITIONS: list[str] = [
     "Upstream function block (>20 lines) missing in merged",
     "TODO [merge] count exceeds phase limit",
     "Unannotated TODO [check] exists",
+    "Top-level invocation/decorator lost after merge",
+    "Customization grep count below baseline",
+    "Customization line retention below required ratio",
+    "Shadow-path conflict unresolved",
+    "Cross-layer assertion keys missing",
+    "Reverse-impact unhandled for upstream interface change",
+    "Smoke test failed",
 ]
+
+
+ISSUE_TYPES_NEW: set[str] = {
+    "top_level_invocation_lost",
+    "customization_grep_below_baseline",
+    "customization_line_retention_below_ratio",
+    "shadow_conflict_unresolved",
+    "cross_layer_assertion_missing",
+    "reverse_impact_unhandled",
+    "smoke_test_failed",
+}
 
 
 class JudgeVerdict(BaseModel):

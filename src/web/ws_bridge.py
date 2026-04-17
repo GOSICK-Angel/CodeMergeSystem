@@ -166,18 +166,10 @@ class MergeWSBridge:
                     "current_classification": item.current_classification,
                     "options": [
                         {
-                            "key": opt.key
-                            if hasattr(opt, "key")
-                            else opt.get("key", ""),
-                            "label": opt.label
-                            if hasattr(opt, "label")
-                            else opt.get("label", ""),
-                            "description": opt.description
-                            if hasattr(opt, "description")
-                            else opt.get("description", ""),
+                            "key": opt.key,
+                            "label": opt.label,
+                            "description": opt.description,
                         }
-                        if hasattr(opt, "key")
-                        else opt
                         for opt in item.options
                     ],
                     "user_choice": item.user_choice,

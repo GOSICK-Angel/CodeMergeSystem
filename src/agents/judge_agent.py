@@ -291,6 +291,134 @@ class JudgeAgent(BaseAgent):
                 )
             )
 
+        for sc in getattr(state, "shadow_conflicts", []) or []:
+            issues.append(
+                JudgeIssue(
+                    file_path=sc.path_a,
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="shadow_conflict_unresolved",
+                    description=(
+                        f"Shadow-path conflict: {sc.path_a} vs {sc.path_b} "
+                        f"({sc.rule_description})"
+                    ),
+                    must_fix_before_merge=True,
+                    veto_condition="Shadow-path conflict unresolved",
+                )
+            )
+
+        issues.extend(self._check_top_level_invocations(state, categories))
+        issues.extend(self._check_cross_layer_assertions(state))
+        issues.extend(self._check_reverse_impacts(state))
+
+        return issues
+
+    def _check_reverse_impacts(self, state: ReadOnlyStateView) -> list[JudgeIssue]:
+        """P1-1: emit VETO for every fork-only file still referencing a symbol
+        whose upstream interface changed."""
+        reverse_impacts = getattr(state, "reverse_impacts", {}) or {}
+        if not reverse_impacts:
+            return []
+
+        interface_changes = getattr(state, "interface_changes", []) or []
+        symbol_to_change: dict[str, str] = {}
+        for change in interface_changes:
+            symbol_to_change.setdefault(
+                change.symbol,
+                f"{change.change_kind}: '{change.before}' -> '{change.after}'",
+            )
+
+        issues: list[JudgeIssue] = []
+        for symbol, files in reverse_impacts.items():
+            if not files:
+                continue
+            detail = symbol_to_change.get(symbol, "interface changed upstream")
+            issues.append(
+                JudgeIssue(
+                    file_path=files[0],
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="reverse_impact_unhandled",
+                    description=(
+                        f"Upstream changed '{symbol}' ({detail}); fork-only files "
+                        f"still reference it: {', '.join(files[:5])}"
+                        f"{'...' if len(files) > 5 else ''}"
+                    ),
+                    must_fix_before_merge=True,
+                    veto_condition=(
+                        "Reverse-impact unhandled for upstream interface change"
+                    ),
+                )
+            )
+        return issues
+
+    def _check_top_level_invocations(
+        self,
+        state: ReadOnlyStateView,
+        categories: dict[str, FileChangeCategory],
+    ) -> list[JudgeIssue]:
+        if self.git_tool is None:
+            return []
+        merge_base = state.merge_base_commit or ""
+        upstream_ref = state.config.upstream_ref
+        if not merge_base or not upstream_ref:
+            return []
+
+        three_way = ThreeWayDiff(self.git_tool)
+        issues: list[JudgeIssue] = []
+        for fp, cat in categories.items():
+            if cat not in (FileChangeCategory.B, FileChangeCategory.C):
+                continue
+            missing = three_way.extract_missing_top_level_invocations(
+                fp, merge_base, upstream_ref
+            )
+            if missing:
+                issues.append(
+                    JudgeIssue(
+                        file_path=fp,
+                        issue_level=IssueSeverity.CRITICAL,
+                        issue_type="top_level_invocation_lost",
+                        description=(
+                            "Top-level invocations/decorators missing after merge: "
+                            f"{', '.join(missing[:10])}"
+                            f"{'...' if len(missing) > 10 else ''}"
+                        ),
+                        must_fix_before_merge=True,
+                        veto_condition="Top-level invocation/decorator lost after merge",
+                    )
+                )
+        return issues
+
+    def _check_cross_layer_assertions(
+        self, state: ReadOnlyStateView
+    ) -> list[JudgeIssue]:
+        if self.git_tool is None:
+            return []
+        assertions = getattr(state.config, "cross_layer_assertions", []) or []
+        if not assertions:
+            return []
+
+        from src.tools.cross_layer_checker import CrossLayerChecker
+
+        checker = CrossLayerChecker(self.git_tool.repo_path)
+        results = checker.check(assertions)
+        issues: list[JudgeIssue] = []
+        for r in results:
+            if not r.missing_keys:
+                continue
+            issues.append(
+                JudgeIssue(
+                    file_path=r.source_file or "(cross_layer)",
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="cross_layer_assertion_missing",
+                    description=(
+                        f"Assertion '{r.assertion_name}': keys missing in "
+                        f"{', '.join(r.target_files)}: "
+                        f"{', '.join(sorted(r.missing_keys)[:10])}"
+                        f"{'...' if len(r.missing_keys) > 10 else ''}"
+                    ),
+                    must_fix_before_merge=True,
+                    veto_condition="Cross-layer assertion keys missing",
+                )
+            )
         return issues
 
     def _is_large_addition(
@@ -383,6 +511,7 @@ class JudgeAgent(BaseAgent):
     def verify_customizations(
         self,
         customizations: list[CustomizationEntry],
+        merge_base: str = "",
     ) -> list[CustomizationViolation]:
         if not self.git_tool or not customizations:
             return []
@@ -394,14 +523,168 @@ class JudgeAgent(BaseAgent):
                 violation: CustomizationViolation | None = None
                 if verif.type == "grep":
                     violation = self._verify_grep(entry.name, verif)
+                elif verif.type == "grep_count_min":
+                    violation = self._verify_grep_count_min(entry.name, verif)
+                elif verif.type == "grep_count_baseline":
+                    violation = self._verify_grep_count_baseline(
+                        entry.name, verif, merge_base
+                    )
                 elif verif.type == "file_exists":
                     violation = self._verify_file_exists(entry.name, verif)
                 elif verif.type == "function_exists":
                     violation = self._verify_function_exists(entry.name, verif)
+                elif verif.type == "line_retention":
+                    violation = self._verify_line_retention(
+                        entry.name, verif, merge_base
+                    )
                 if violation:
                     violations.append(violation)
 
         return violations
+
+    def _verify_grep_count_min(
+        self,
+        customization_name: str,
+        verif: CustomizationVerification,
+    ) -> CustomizationViolation | None:
+        if not self.git_tool or not verif.pattern or verif.min_count is None:
+            return None
+
+        results = self.git_tool.grep_in_files(verif.pattern, verif.files)
+        total_matches = sum(len(m) for m in results.values())
+        checked = list(results.keys())
+
+        if total_matches < verif.min_count:
+            return CustomizationViolation(
+                customization_name=customization_name,
+                verification_type="grep_count_min",
+                expected_pattern=(
+                    f"{verif.pattern} (>= {verif.min_count} matches, "
+                    f"got {total_matches})"
+                ),
+                checked_files=checked,
+                match_count=total_matches,
+            )
+        return None
+
+    def _verify_grep_count_baseline(
+        self,
+        customization_name: str,
+        verif: CustomizationVerification,
+        merge_base: str,
+    ) -> CustomizationViolation | None:
+        if not self.git_tool or not verif.pattern:
+            return None
+
+        baseline_ref = verif.baseline_ref or merge_base
+        if not baseline_ref:
+            return None
+
+        baseline_total = self._count_matches_at_ref(
+            verif.pattern, verif.files, baseline_ref
+        )
+        if baseline_total == 0:
+            return None
+
+        results = self.git_tool.grep_in_files(verif.pattern, verif.files)
+        current_total = sum(len(m) for m in results.values())
+
+        if current_total < baseline_total:
+            return CustomizationViolation(
+                customization_name=customization_name,
+                verification_type="grep_count_baseline",
+                expected_pattern=(
+                    f"{verif.pattern} (baseline={baseline_total}, "
+                    f"current={current_total})"
+                ),
+                checked_files=list(results.keys()),
+                match_count=current_total,
+            )
+        return None
+
+    def _verify_line_retention(
+        self,
+        customization_name: str,
+        verif: CustomizationVerification,
+        merge_base: str,
+    ) -> CustomizationViolation | None:
+        if not self.git_tool or verif.retention_ratio is None or not verif.files:
+            return None
+
+        baseline_ref = verif.baseline_ref or merge_base
+        if not baseline_ref:
+            return None
+
+        all_files = [
+            str(p.relative_to(self.git_tool.repo_path))
+            for p in self.git_tool.repo_path.rglob("*")
+            if p.is_file()
+        ]
+        target_files: list[str] = []
+        for glob_pat in verif.files:
+            for fp in all_files:
+                if fnmatch.fnmatch(fp, glob_pat):
+                    target_files.append(fp)
+
+        for fp in target_files:
+            baseline_content = self.git_tool.get_file_content(baseline_ref, fp)
+            if baseline_content is None:
+                continue
+            baseline_lines = {
+                ln.strip() for ln in baseline_content.splitlines() if ln.strip()
+            }
+            if not baseline_lines:
+                continue
+
+            abs_path = self.git_tool.repo_path / fp
+            if not abs_path.exists():
+                return CustomizationViolation(
+                    customization_name=customization_name,
+                    verification_type="line_retention",
+                    expected_pattern=(
+                        f"{fp}: file missing after merge "
+                        f"(required retention {verif.retention_ratio:.2f})"
+                    ),
+                    checked_files=[fp],
+                    match_count=0,
+                )
+
+            current_content = abs_path.read_text(encoding="utf-8")
+            current_lines = {
+                ln.strip() for ln in current_content.splitlines() if ln.strip()
+            }
+            retained = len(baseline_lines & current_lines)
+            ratio = retained / len(baseline_lines)
+            if ratio < verif.retention_ratio:
+                return CustomizationViolation(
+                    customization_name=customization_name,
+                    verification_type="line_retention",
+                    expected_pattern=(
+                        f"{fp}: retention {ratio:.2f} < required "
+                        f"{verif.retention_ratio:.2f} "
+                        f"(kept {retained}/{len(baseline_lines)} lines)"
+                    ),
+                    checked_files=[fp],
+                    match_count=retained,
+                )
+        return None
+
+    def _count_matches_at_ref(
+        self, pattern: str, file_globs: list[str], ref: str
+    ) -> int:
+        if not self.git_tool:
+            return 0
+        files_at_ref = self.git_tool.list_files(ref)
+        compiled = re.compile(pattern)
+        total = 0
+        for fp in files_at_ref:
+            if not any(fnmatch.fnmatch(fp, gp) for gp in file_globs):
+                continue
+            content = self.git_tool.get_file_content(ref, fp)
+            if content is None:
+                continue
+            total += len(compiled.findall(content))
+        return total
 
     def _verify_grep(
         self,

@@ -2,12 +2,13 @@ import json
 import logging
 import signal
 from pathlib import Path
+from typing import Any
 from src.models.state import MergeState
 
 logger = logging.getLogger(__name__)
 
 
-def _atomic_write(path: Path, data: dict) -> None:
+def _atomic_write(path: Path, data: dict[str, Any]) -> None:
     """Write JSON atomically via temp file + rename (POSIX-safe)."""
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")

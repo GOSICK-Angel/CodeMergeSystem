@@ -166,9 +166,33 @@ class MergeLayerConfig(BaseModel):
 
 
 class CustomizationVerification(BaseModel):
-    type: Literal["grep", "file_exists", "function_exists"] = "grep"
+    type: Literal[
+        "grep",
+        "grep_count_min",
+        "grep_count_baseline",
+        "file_exists",
+        "function_exists",
+        "line_retention",
+    ] = "grep"
     pattern: str = ""
     files: list[str] = Field(default_factory=list)
+    min_count: int | None = Field(
+        default=None,
+        ge=1,
+        description="For grep_count_min: minimum total matches required across files.",
+    )
+    baseline_ref: str | None = Field(
+        default=None,
+        description="Git ref used as baseline (e.g. merge-base SHA). "
+        "None means auto-resolve to merge_base_commit.",
+    )
+    retention_ratio: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="For line_retention: required ratio of baseline lines "
+        "still present in HEAD (0.9 = keep 90%).",
+    )
 
 
 class CustomizationEntry(BaseModel):
@@ -178,17 +202,62 @@ class CustomizationEntry(BaseModel):
     verification: list[CustomizationVerification] = Field(default_factory=list)
 
 
+class ShadowRuleConfig(BaseModel):
+    """Pairs of extensions (or module-vs-package) that shadow each other in module resolution."""
+
+    exts_a: list[str] = Field(default_factory=list)
+    exts_b: list[str] = Field(default_factory=list)
+    module_vs_package: bool = Field(
+        default=False,
+        description="If True: detect m.py vs m/__init__.py style shadow.",
+    )
+    description: str = ""
+
+
+class CrossLayerAssertion(BaseModel):
+    """Declarative cross-layer key consistency assertion.
+
+    keys_from = "<file>::<regex>" — capture group 1 is the key.
+    keys_in   = list of files that must contain each key (as literal substring).
+    allow_missing = keys that may be absent without violating.
+    """
+
+    name: str
+    keys_from: str
+    keys_in: list[str] = Field(default_factory=list)
+    allow_missing: list[str] = Field(default_factory=list)
+
+
 class GateCommandConfig(BaseModel):
     name: str
     command: str
     working_dir: str = "."
     timeout_seconds: int = 300
-    pass_criteria: Literal["exit_zero", "not_worse_than_baseline"] = "exit_zero"
+    pass_criteria: Literal[
+        "exit_zero",
+        "not_worse_than_baseline",
+        "no_new_regression",
+    ] = "exit_zero"
+    baseline_parser: str = Field(
+        default="",
+        description="P1-2: parser name for structured baseline diff "
+        "(pytest_summary, mypy_json, ruff_json, eslint_json, tsc_errors, "
+        "go_test_json, cargo_test_json, junit_xml). Empty disables parsing.",
+    )
 
 
 class GateBaseline(BaseModel):
     gate_name: str
-    baseline_value: str = ""
+    baseline_value: str = Field(
+        default="",
+        description="Legacy raw stdout_tail baseline output.",
+    )
+    structured_baseline: dict[str, Any] = Field(
+        default_factory=dict,
+        description="P1-2: parsed structured baseline — "
+        '{"passed": int, "failed": int, "failed_ids": list[str]}',
+    )
+    parser_name: str = ""
     recorded_at: datetime = Field(default_factory=datetime.now)
 
 
@@ -196,6 +265,46 @@ class GateConfig(BaseModel):
     enabled: bool = True
     max_consecutive_failures: int = Field(default=3, ge=1)
     commands: list[GateCommandConfig] = Field(default_factory=list)
+
+
+class ReverseImpactConfig(BaseModel):
+    """P1-1: configure reverse-impact scan scope and behavior."""
+
+    enabled: bool = True
+    extra_scan_globs: list[str] = Field(
+        default_factory=list,
+        description="Additional file globs (beyond D_EXTRA and customization.files) "
+        "to scan for symbol references.",
+    )
+    max_files_per_symbol: int = Field(default=100, ge=1)
+
+
+class SmokeTestCase(BaseModel):
+    """A single smoke-test case. Exactly one of cmd/url/tag is used depending on ``kind``."""
+
+    id: str
+    cmd: str = ""
+    url: str = ""
+    method: Literal["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"] = "GET"
+    expect_status: int = 200
+    body: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+    tag: str = ""
+    timeout_seconds: int = Field(default=60, ge=1)
+
+
+class SmokeTestSuite(BaseModel):
+    name: str
+    kind: Literal["shell", "http", "playwright"] = "shell"
+    working_dir: str = "."
+    cases: list[SmokeTestCase] = Field(default_factory=list)
+
+
+class SmokeTestConfig(BaseModel):
+    enabled: bool = False
+    suites: list[SmokeTestSuite] = Field(default_factory=list)
+    block_on_failure: bool = True
+    max_consecutive_failures: int = Field(default=3, ge=1)
 
 
 class MigrationConfig(BaseModel):
@@ -258,7 +367,23 @@ class MergeConfig(BaseModel):
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     layer_config: MergeLayerConfig = Field(default_factory=MergeLayerConfig)
     customizations: list[CustomizationEntry] = Field(default_factory=list)
+    shadow_rules_extra: list[ShadowRuleConfig] = Field(
+        default_factory=list,
+        description="Additional shadow-conflict rules appended to DEFAULT_SHADOW_RULES.",
+    )
+    cross_layer_assertions: list[CrossLayerAssertion] = Field(
+        default_factory=list,
+        description="Declarative cross-layer key consistency assertions (P0-4).",
+    )
     gate: GateConfig = Field(default_factory=GateConfig)
+    reverse_impact: ReverseImpactConfig = Field(
+        default_factory=ReverseImpactConfig,
+        description="P1-1: reverse-impact scan configuration.",
+    )
+    smoke_tests: SmokeTestConfig = Field(
+        default_factory=SmokeTestConfig,
+        description="P1-3: post-judge smoke test configuration.",
+    )
     migration: MigrationConfig = Field(default_factory=MigrationConfig)
     history: HistoryPreservationConfig = Field(
         default_factory=HistoryPreservationConfig

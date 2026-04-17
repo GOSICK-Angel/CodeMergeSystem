@@ -147,8 +147,10 @@ def resume_command(
 @click.option("--output", "-o", default="./outputs")
 def report_command(run_id: str, output: str) -> None:
     """Generate reports only (without executing merge)"""
-    checkpoint_manager = Checkpoint(output)
-    latest = checkpoint_manager.get_latest(run_id)
+    from src.cli.paths import get_run_dir
+
+    checkpoint_manager = Checkpoint(get_run_dir(run_id=run_id))
+    latest = checkpoint_manager.get_latest()
     if latest is None:
         console.print(f"[red]No checkpoint found for run_id: {run_id}[/red]")
         sys.exit(1)
@@ -246,12 +248,14 @@ def ui_command(
 ) -> None:
     """Start web UI for merge decisions"""
     from src.core.checkpoint import Checkpoint
+    from src.cli.paths import get_run_dir
 
-    cp = Checkpoint("./outputs/debug")
     if checkpoint:
+        cp = Checkpoint(Path(checkpoint).parent)
         state = cp.load(Path(checkpoint))
     elif run_id:
-        latest = cp.get_latest(run_id)
+        cp = Checkpoint(get_run_dir(run_id=run_id))
+        latest = cp.get_latest()
         if latest is None:
             console.print(f"[red]No checkpoint found for run_id: {run_id}[/red]")
             sys.exit(1)

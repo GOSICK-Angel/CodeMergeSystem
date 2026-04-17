@@ -10,7 +10,11 @@ from src.core.phases._gate_helpers import (
     run_gates,
 )
 from src.core.read_only_state_view import ReadOnlyStateView
-from src.models.judge import VerdictType
+from src.models.judge import (
+    IssueSeverity,
+    JudgeIssue,
+    VerdictType,
+)
 from src.models.plan import MergePhase
 from src.models.state import MergeState, PhaseResult, SystemStatus
 
@@ -46,7 +50,8 @@ class JudgeReviewPhase(Phase):
                 state.judge_verdict = JV.model_validate(verdict_data)
 
             customization_violations = judge.verify_customizations(
-                ctx.config.customizations
+                ctx.config.customizations,
+                merge_base=state.merge_base_commit,
             )
             if state.judge_verdict and customization_violations:
                 state.judge_verdict = state.judge_verdict.model_copy(
@@ -147,6 +152,21 @@ class JudgeReviewPhase(Phase):
 
         verdict_type = state.judge_verdict.verdict
         if verdict_type == VerdictType.PASS:
+            await self._run_smoke_tests(state, ctx)
+            if state.judge_verdict.verdict == VerdictType.FAIL and (
+                state.judge_verdict.veto_triggered
+            ):
+                ctx.state_machine.transition(
+                    state,
+                    SystemStatus.AWAITING_HUMAN,
+                    f"smoke VETO: {state.judge_verdict.veto_reason}",
+                )
+                return PhaseOutcome(
+                    target_status=SystemStatus.AWAITING_HUMAN,
+                    reason=f"smoke VETO: {state.judge_verdict.veto_reason}",
+                    checkpoint_tag="after_phase5_smoke",
+                    memory_phase="judge_review",
+                )
             ctx.state_machine.transition(
                 state, SystemStatus.GENERATING_REPORT, "judge verdict: PASS"
             )
@@ -181,3 +201,75 @@ class JudgeReviewPhase(Phase):
             checkpoint_tag="after_phase5",
             memory_phase="judge_review",
         )
+
+    async def _run_smoke_tests(self, state: MergeState, ctx: PhaseContext) -> None:
+        """P1-3 Phase 5.5: run smoke tests after Judge PASS.
+
+        If any case fails and ``smoke_tests.block_on_failure`` is True,
+        downgrade ``state.judge_verdict`` to FAIL + veto and append a
+        ``smoke_test_failed`` issue. Smoke tests are skipped when
+        disabled or no suites are configured.
+        """
+        cfg = state.config.smoke_tests
+        if not cfg.enabled or not cfg.suites:
+            return
+
+        ctx.notify("orchestrator", "Running smoke tests (Phase 5.5)")
+
+        from src.agents.smoke_test_agent import SmokeTestAgent
+
+        agent = ctx.agents.get("smoke_test")
+        if agent is None:
+            agent = SmokeTestAgent(
+                state.config.agents.judge,
+                repo_path=state.config.repo_path,
+            )
+
+        try:
+            await agent.run(state)
+        except Exception as exc:
+            logger.error("Smoke tests raised unexpectedly: %s", exc)
+            return
+
+        report = state.smoke_test_report
+        if report is None or report.all_passed:
+            return
+
+        if not cfg.block_on_failure:
+            logger.warning(
+                "Smoke tests failed (%d/%d) but block_on_failure=False",
+                report.total_failed,
+                report.total_cases,
+            )
+            return
+
+        failed_summary = ", ".join(
+            f"{r.suite_name}:{r.case_id}" for r in report.failed_results()[:5]
+        )
+        new_issue = JudgeIssue(
+            file_path="(smoke)",
+            issue_level=IssueSeverity.CRITICAL,
+            issue_type="smoke_test_failed",
+            description=(
+                f"Smoke test regressions after Judge PASS: "
+                f"{report.total_failed}/{report.total_cases} cases failed "
+                f"({failed_summary})"
+            ),
+            must_fix_before_merge=True,
+            veto_condition="Smoke test failed",
+        )
+        if state.judge_verdict is not None:
+            state.judge_verdict = state.judge_verdict.model_copy(
+                update={
+                    "verdict": VerdictType.FAIL,
+                    "veto_triggered": True,
+                    "veto_reason": (
+                        f"Smoke test failed: {report.total_failed} cases "
+                        f"({failed_summary})"
+                    ),
+                    "issues": list(state.judge_verdict.issues) + [new_issue],
+                    "critical_issues_count": (
+                        state.judge_verdict.critical_issues_count + 1
+                    ),
+                }
+            )

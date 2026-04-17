@@ -49,7 +49,7 @@ class ExecutorAgent(BaseAgent):
                 continue
 
             for file_path in batch.file_paths:
-                fd = file_diffs_map.get(file_path)
+                fd = file_diffs_map.get(file_path)  # type: ignore[assignment]
                 category = batch.change_category or (fd.change_category if fd else None)
                 strategy = self._select_strategy_by_category(category, batch.risk_level)
 
@@ -351,7 +351,7 @@ class ExecutorAgent(BaseAgent):
         for fd in state.file_diffs:
             fd_map[fd.file_path] = fd
 
-        fd = fd_map.get(request.file_path)
+        fd = fd_map.get(request.file_path)  # type: ignore[assignment]
         if fd is None:
             fd = FileDiff(
                 file_path=request.file_path,

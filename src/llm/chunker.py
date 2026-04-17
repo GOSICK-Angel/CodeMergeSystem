@@ -74,11 +74,11 @@ def detect_language(file_path: str) -> str | None:
 
 _HAS_TREE_SITTER = False
 try:
-    import tree_sitter
+    import tree_sitter  # type: ignore[import-not-found]
 
     _HAS_TREE_SITTER = True
 except ImportError:
-    tree_sitter = None  # type: ignore[assignment]
+    tree_sitter = None
 
 
 CHUNK_BOUNDARY_NODES: dict[str, dict[str, ChunkKind]] = {

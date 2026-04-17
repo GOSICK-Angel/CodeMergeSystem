@@ -18,11 +18,9 @@ from src.models.diff import FileDiff, FileChangeCategory, RiskLevel
 from src.models.plan_judge import PlanIssue
 from src.models.state import MergeState
 from src.llm.prompts.planner_prompts import (
-    PLANNER_SYSTEM,
     PLANNER_EVALUATION_SYSTEM,
     get_planner_system,
     build_classification_prompt,
-    build_revision_prompt,
     build_evaluation_prompt,
 )
 from src.models.plan_review import (
@@ -103,6 +101,8 @@ class PlannerAgent(BaseAgent):
     def _build_layered_plan(
         self, file_diffs: list[FileDiff], state: MergeState
     ) -> MergePlan:
+        from src.tools.shadow_conflict_detector import ShadowConflictDetector
+
         layers = self._resolve_layers(state.config)
         categories = state.file_categories
         diffs_by_path = {fd.file_path: fd for fd in file_diffs}
@@ -115,6 +115,14 @@ class PlannerAgent(BaseAgent):
         actionable_files = {
             fp: cat for fp, cat in categories.items() if cat in actionable
         }
+
+        detector = ShadowConflictDetector.from_config(state.config.shadow_rules_extra)
+        shadow_conflicts = detector.detect(list(categories.keys()))
+        state.shadow_conflicts = shadow_conflicts
+        shadow_paths: set[str] = set()
+        for sc in shadow_conflicts:
+            shadow_paths.add(sc.path_a)
+            shadow_paths.add(sc.path_b)
 
         file_layer_map = self._assign_files_to_layers(
             list(actionable_files.keys()), layers
@@ -132,7 +140,9 @@ class PlannerAgent(BaseAgent):
                 cat = actionable_files[fp]
                 by_category.setdefault(cat, []).append(fp)
 
-            b_files = by_category.get(FileChangeCategory.B, [])
+            b_files_all = by_category.get(FileChangeCategory.B, [])
+            b_files = [fp for fp in b_files_all if fp not in shadow_paths]
+            b_shadow_files = [fp for fp in b_files_all if fp in shadow_paths]
             if b_files:
                 phases.append(
                     PhaseFileBatch(
@@ -145,8 +155,22 @@ class PlannerAgent(BaseAgent):
                         can_parallelize=True,
                     )
                 )
+            if b_shadow_files:
+                phases.append(
+                    PhaseFileBatch(
+                        batch_id=str(uuid4()),
+                        phase=MergePhase.HUMAN_REVIEW,
+                        file_paths=sorted(b_shadow_files),
+                        risk_level=RiskLevel.HUMAN_REQUIRED,
+                        layer_id=layer.layer_id,
+                        change_category=FileChangeCategory.B,
+                        can_parallelize=False,
+                    )
+                )
 
-            d_files = by_category.get(FileChangeCategory.D_MISSING, [])
+            d_files_all = by_category.get(FileChangeCategory.D_MISSING, [])
+            d_files = [fp for fp in d_files_all if fp not in shadow_paths]
+            d_shadow_files = [fp for fp in d_files_all if fp in shadow_paths]
             if d_files:
                 phases.append(
                     PhaseFileBatch(
@@ -159,6 +183,18 @@ class PlannerAgent(BaseAgent):
                         can_parallelize=True,
                     )
                 )
+            if d_shadow_files:
+                phases.append(
+                    PhaseFileBatch(
+                        batch_id=str(uuid4()),
+                        phase=MergePhase.HUMAN_REVIEW,
+                        file_paths=sorted(d_shadow_files),
+                        risk_level=RiskLevel.HUMAN_REQUIRED,
+                        layer_id=layer.layer_id,
+                        change_category=FileChangeCategory.D_MISSING,
+                        can_parallelize=False,
+                    )
+                )
 
             c_files = by_category.get(FileChangeCategory.C, [])
             if c_files:
@@ -166,6 +202,9 @@ class PlannerAgent(BaseAgent):
                 c_risky = []
                 c_human = []
                 for fp in c_files:
+                    if fp in shadow_paths:
+                        c_human.append(fp)
+                        continue
                     fd = diffs_by_path.get(fp)
                     if fd is None:
                         c_risky.append(fp)

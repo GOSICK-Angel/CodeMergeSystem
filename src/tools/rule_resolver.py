@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +181,6 @@ class RuleBasedResolver:
 
         merged_lines: list[str] = []
         import_inserted = False
-        insert_pos = max(c_start, t_start, b_start, 0)
 
         for i, line in enumerate(base_lines):
             if _is_import(line):

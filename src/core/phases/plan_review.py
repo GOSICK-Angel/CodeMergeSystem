@@ -491,9 +491,9 @@ class PlanReviewPhase(Phase):
                 if fp and reason:
                     reasons.setdefault(fp, []).append(reason)
         if state.plan_judge_verdict:
-            for iss in state.plan_judge_verdict.issues:
-                if iss.file_path and iss.reason:
-                    reasons.setdefault(iss.file_path, []).append(iss.reason)
+            for issue in state.plan_judge_verdict.issues:
+                if issue.file_path and issue.reason:
+                    reasons.setdefault(issue.file_path, []).append(issue.reason)
         for fp in reasons:
             reasons[fp] = list(dict.fromkeys(reasons[fp]))
         return reasons

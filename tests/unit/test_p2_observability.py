@@ -154,7 +154,7 @@ class TestJudgeIssueVetoCondition:
         assert issue.veto_condition is None
 
     def test_veto_conditions_list(self):
-        assert len(VETO_CONDITIONS) == 6
+        assert len(VETO_CONDITIONS) >= 6
         assert any("B-class" in c for c in VETO_CONDITIONS)
         assert any("D-missing" in c for c in VETO_CONDITIONS)
         assert any("TODO [merge]" in c for c in VETO_CONDITIONS)

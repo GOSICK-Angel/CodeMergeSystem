@@ -118,7 +118,7 @@ class ConflictAnalysisPhase(Phase):
         rule_resolver = RuleBasedResolver()
         rule_resolved_files: set[str] = set()
         for file_path in high_risk_files:
-            fd = file_diffs_map.get(file_path)
+            fd = file_diffs_map.get(file_path)  # type: ignore[assignment]
             if fd is None:
                 continue
             base_c = target_c = current_c = None
@@ -162,7 +162,7 @@ class ConflictAnalysisPhase(Phase):
         total = len(llm_files)
         circuit_breaker_open = False
         for idx, file_path in enumerate(llm_files, 1):
-            fd = file_diffs_map.get(file_path)
+            fd = file_diffs_map.get(file_path)  # type: ignore[assignment]
             if fd is None:
                 continue
 
@@ -224,7 +224,7 @@ class ConflictAnalysisPhase(Phase):
         needs_human: list[str] = []
         decided = 0
         for file_path, analysis in state.conflict_analyses.items():
-            fd = file_diffs_map.get(file_path)
+            fd = file_diffs_map.get(file_path)  # type: ignore[assignment]
             if fd is None:
                 continue
 

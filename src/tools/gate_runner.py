@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from src.models.config import GateCommandConfig
+from src.tools.baseline_parsers import (
+    BaselineSnapshot,
+    diff_new_failures,
+    empty_snapshot,
+    get_parser,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +35,11 @@ class GateReport(BaseModel):
     all_passed: bool
     results: list[GateResult] = Field(default_factory=list)
     baseline_comparison: dict[str, str] = Field(default_factory=dict)
+    new_failures: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="P1-2: gate_name -> list of failed_ids newly introduced "
+        "versus baseline (empty when no regression).",
+    )
 
 
 class GateRunner:
@@ -101,6 +115,9 @@ class GateRunner:
         baselines: dict[str, str] | None = None,
     ) -> GateReport:
         results: list[GateResult] = []
+        new_failures: dict[str, list[str]] = {}
+        gate_by_name: dict[str, GateCommandConfig] = {g.name: g for g in gates}
+
         for gate in gates:
             result = await self.run_gate(gate)
 
@@ -126,13 +143,25 @@ class GateRunner:
                             baseline_failed,
                         )
 
+            if gate.pass_criteria == "no_new_regression":
+                result, regressions = self._apply_baseline_diff(
+                    gate=gate,
+                    result=result,
+                    baselines=baselines or {},
+                )
+                if regressions:
+                    new_failures[gate.name] = regressions
+
             results.append(result)
 
         comparison: dict[str, str] = {}
         if baselines:
             for result in results:
                 baseline = baselines.get(result.gate_name)
-                if baseline is None:
+                gate_cfg = gate_by_name.get(result.gate_name)
+                if baseline is None and (
+                    not gate_cfg or gate_cfg.pass_criteria != "no_new_regression"
+                ):
                     comparison[result.gate_name] = "no_baseline"
                 elif result.passed:
                     comparison[result.gate_name] = "passed"
@@ -145,14 +174,108 @@ class GateRunner:
             all_passed=all_passed,
             results=results,
             baseline_comparison=comparison,
+            new_failures=new_failures,
         )
+
+    def _apply_baseline_diff(
+        self,
+        gate: GateCommandConfig,
+        result: GateResult,
+        baselines: dict[str, str],
+    ) -> tuple[GateResult, list[str]]:
+        """Apply P1-2 ``no_new_regression`` semantics using a structured parser.
+
+        Returns ``(possibly-updated result, list of newly-failed ids)``.
+        A gate passes when the set of current failed_ids is a subset of the
+        baseline — even if exit code is non-zero. Fails when at least one new
+        failed_id appears, regardless of total count trend.
+        """
+        parser_name = gate.baseline_parser
+        if not parser_name:
+            return result, []
+
+        parser = get_parser(parser_name)
+        if parser is None:
+            logger.warning(
+                "Gate '%s' baseline_parser='%s' not registered", gate.name, parser_name
+            )
+            return result, []
+
+        current_snapshot = parser(result.stdout_tail)
+
+        baseline_raw = baselines.get(gate.name)
+        baseline_snapshot: BaselineSnapshot = empty_snapshot()
+        if baseline_raw:
+            baseline_snapshot = self._parse_or_fallback(parser, baseline_raw)
+
+        new_ids = diff_new_failures(baseline_snapshot, current_snapshot)
+
+        if not new_ids:
+            if not result.passed:
+                logger.info(
+                    "Gate '%s' no_new_regression: 0 new failed_ids, treating as pass",
+                    gate.name,
+                )
+            return result.model_copy(update={"passed": True}), []
+
+        updated = result.model_copy(update={"passed": False})
+        logger.warning(
+            "Gate '%s' no_new_regression: %d new failed_ids: %s",
+            gate.name,
+            len(new_ids),
+            new_ids[:5],
+        )
+        return updated, new_ids
+
+    @staticmethod
+    def _parse_or_fallback(parser: Any, baseline_raw: str) -> BaselineSnapshot:
+        """Accept either a JSON-encoded snapshot or raw stdout.
+
+        Newer baselines are recorded via ``record_baseline_structured`` as
+        JSON; legacy baselines are raw stdout_tail strings that we re-parse
+        at diff time.
+        """
+        candidate = baseline_raw.strip()
+        if candidate.startswith("{"):
+            try:
+                data = json.loads(candidate)
+                if isinstance(data, dict):
+                    return {
+                        "passed": int(data.get("passed", 0)),
+                        "failed": int(data.get("failed", 0)),
+                        "failed_ids": list(data.get("failed_ids", []) or []),
+                    }
+            except (ValueError, TypeError):
+                pass
+        return parser(baseline_raw)
 
     async def record_baseline(self, gates: list[GateCommandConfig]) -> dict[str, str]:
         baselines: dict[str, str] = {}
         for gate in gates:
             result = await self.run_gate(gate)
+            if gate.baseline_parser:
+                parser = get_parser(gate.baseline_parser)
+                if parser is not None:
+                    snapshot = parser(result.stdout_tail)
+                    baselines[gate.name] = json.dumps(snapshot)
+                    continue
             baselines[gate.name] = result.stdout_tail
         return baselines
+
+    async def record_baseline_structured(
+        self, gates: list[GateCommandConfig]
+    ) -> dict[str, BaselineSnapshot]:
+        """P1-2: record structured baselines keyed by gate name."""
+        out: dict[str, BaselineSnapshot] = {}
+        for gate in gates:
+            result = await self.run_gate(gate)
+            snapshot: BaselineSnapshot = empty_snapshot()
+            if gate.baseline_parser:
+                parser = get_parser(gate.baseline_parser)
+                if parser is not None:
+                    snapshot = parser(result.stdout_tail)
+            out[gate.name] = snapshot
+        return out
 
 
 def _extract_failed_count(output: str) -> int | None:

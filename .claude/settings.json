@@ -9,6 +9,18 @@
             "command": "jq -r '.tool_input.file_path // .tool_response.filePath' | { read -r f; [[ \"$f\" == *.py ]] && ruff format \"$f\" 2>/dev/null || true; }",
             "timeout": 10,
             "statusMessage": "Formatting with ruff..."
+          },
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath' | { read -r f; [[ \"$f\" == *.py ]] && ruff check src/ 2>&1 || true; }",
+            "timeout": 15,
+            "statusMessage": "Linting with ruff..."
+          },
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath' | { read -r f; [[ \"$f\" == *.py ]] && mypy src 2>&1 || true; }",
+            "timeout": 60,
+            "statusMessage": "Type-checking with mypy..."
           }
         ]
       }

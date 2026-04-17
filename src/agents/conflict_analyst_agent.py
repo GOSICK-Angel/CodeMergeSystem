@@ -46,7 +46,7 @@ class ConflictAnalystAgent(BaseAgent):
             file_diffs_map[fd.file_path] = fd
 
         for file_path in high_risk_files:
-            fd = file_diffs_map.get(file_path)
+            fd = file_diffs_map.get(file_path)  # type: ignore[assignment]
             if fd is None:
                 continue
 
