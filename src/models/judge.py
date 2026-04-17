@@ -63,6 +63,8 @@ VETO_CONDITIONS: list[str] = [
     "Cross-layer assertion keys missing",
     "Reverse-impact unhandled for upstream interface change",
     "Smoke test failed",
+    "Sentinel hit in AUTO_SAFE file unacknowledged",
+    "Config retention required line missing",
 ]
 
 
@@ -74,6 +76,8 @@ ISSUE_TYPES_NEW: set[str] = {
     "cross_layer_assertion_missing",
     "reverse_impact_unhandled",
     "smoke_test_failed",
+    "sentinel_hit_unacknowledged",
+    "config_retention_violation",
 }
 
 

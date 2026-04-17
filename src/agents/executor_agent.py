@@ -44,6 +44,12 @@ class ExecutorAgent(BaseAgent):
         for fd in state.file_diffs:
             file_diffs_map[fd.file_path] = fd
 
+        from src.tools.sentinel_scanner import SentinelScanner
+
+        sentinel_scanner = SentinelScanner.from_config_extras(
+            list(getattr(state.config, "sentinels_extra", None) or [])
+        )
+
         for batch in state.merge_plan.phases:
             if batch.risk_level not in (RiskLevel.AUTO_SAFE, RiskLevel.DELETED_ONLY):
                 continue
@@ -59,6 +65,47 @@ class ExecutorAgent(BaseAgent):
                         state.file_decision_records[file_path] = record
                         processed += 1
                     continue
+
+                if (
+                    batch.risk_level == RiskLevel.AUTO_SAFE
+                    and self.git_tool is not None
+                ):
+                    fork_content = self.git_tool.get_file_content(
+                        state.config.fork_ref, file_path
+                    )
+                    if fork_content:
+                        hits = sentinel_scanner.scan(fork_content, file_path)
+                        if hits:
+                            state.sentinel_hits[file_path] = hits
+                            if fd is None:
+                                from src.models.diff import FileDiff, FileStatus
+
+                                fd = FileDiff(
+                                    file_path=file_path,
+                                    file_status=FileStatus.MODIFIED,
+                                    risk_level=RiskLevel.AUTO_SAFE,
+                                    risk_score=0.5,
+                                )
+                            self.raise_plan_dispute(
+                                fd,
+                                reason=(
+                                    f"Sentinel marker(s) found in AUTO_SAFE fork "
+                                    f"file '{file_path}': "
+                                    + "; ".join(
+                                        f"line {h.line_number}: {h.matched_text[:60]}"
+                                        for h in hits[:3]
+                                    )
+                                ),
+                                suggested={file_path: RiskLevel.HUMAN_REQUIRED},
+                                impact=(
+                                    "File contains fork-customization markers. "
+                                    "Overwriting with upstream may silently drop "
+                                    "fork-only logic."
+                                ),
+                                state=state,
+                            )
+                            disputes.append(file_path)
+                            continue
 
                 if category == FileChangeCategory.D_MISSING:
                     record = await self._copy_from_upstream(file_path, state)

@@ -30,6 +30,8 @@ if TYPE_CHECKING:
     from src.tools.shadow_conflict_detector import ShadowConflict
     from src.tools.interface_change_extractor import InterfaceChange
     from src.models.smoke import SmokeTestReport
+    from src.tools.scar_list_builder import Scar
+    from src.tools.sentinel_scanner import SentinelHit
 
 
 class SystemStatus(str, Enum):
@@ -126,6 +128,14 @@ class MergeState(BaseModel):
         description="P1-3: post-judge smoke test report.",
     )
     consecutive_smoke_failures: int = 0
+    scar_list: list[Scar] = Field(
+        default_factory=list,
+        description="P2-1: scars learned from historical restore/revert/compat-fix commits.",
+    )
+    sentinel_hits: dict[str, list[SentinelHit]] = Field(
+        default_factory=dict,
+        description="P2-2: file_path -> list of sentinel hits found in the fork version.",
+    )
 
     memory: MergeMemory = Field(default_factory=MergeMemory)
     dependency_graph: FileDependencyGraph = Field(default_factory=FileDependencyGraph)
@@ -156,6 +166,8 @@ def _rebuild_state_model() -> None:
     from src.tools.shadow_conflict_detector import ShadowConflict
     from src.tools.interface_change_extractor import InterfaceChange
     from src.models.smoke import SmokeTestReport
+    from src.tools.scar_list_builder import Scar
+    from src.tools.sentinel_scanner import SentinelHit
 
     MergeState.model_rebuild(
         _types_namespace={
@@ -165,6 +177,8 @@ def _rebuild_state_model() -> None:
             "ShadowConflict": ShadowConflict,
             "InterfaceChange": InterfaceChange,
             "SmokeTestReport": SmokeTestReport,
+            "Scar": Scar,
+            "SentinelHit": SentinelHit,
         }
     )
 

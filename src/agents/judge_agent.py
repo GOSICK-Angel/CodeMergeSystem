@@ -309,6 +309,8 @@ class JudgeAgent(BaseAgent):
         issues.extend(self._check_top_level_invocations(state, categories))
         issues.extend(self._check_cross_layer_assertions(state))
         issues.extend(self._check_reverse_impacts(state))
+        issues.extend(self._check_sentinel_hits(state))
+        issues.extend(self._check_config_retention(state))
 
         return issues
 
@@ -385,6 +387,72 @@ class JudgeAgent(BaseAgent):
                         veto_condition="Top-level invocation/decorator lost after merge",
                     )
                 )
+        return issues
+
+    def _check_sentinel_hits(self, state: ReadOnlyStateView) -> list[JudgeIssue]:
+        """P2-2: emit VETO for every AUTO_SAFE file where the Executor found sentinels."""
+        sentinel_hits = getattr(state, "sentinel_hits", {}) or {}
+        if not sentinel_hits:
+            return []
+
+        issues: list[JudgeIssue] = []
+        for file_path, hits in sentinel_hits.items():
+            if not hits:
+                continue
+            sample = "; ".join(
+                f"line {h.line_number}: {h.matched_text[:60]}" for h in hits[:3]
+            )
+            issues.append(
+                JudgeIssue(
+                    file_path=file_path,
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="sentinel_hit_unacknowledged",
+                    description=(
+                        f"Fork-customization sentinel marker(s) found in "
+                        f"AUTO_SAFE file '{file_path}': {sample}"
+                    ),
+                    must_fix_before_merge=True,
+                    veto_condition="Sentinel hit in AUTO_SAFE file unacknowledged",
+                )
+            )
+        return issues
+
+    def _check_config_retention(self, state: ReadOnlyStateView) -> list[JudgeIssue]:
+        """P2-3: verify required lines still present in CI/env/docker files."""
+        if self.git_tool is None:
+            return []
+
+        config_retention = getattr(state.config, "config_retention", None)
+        if config_retention is None or not getattr(config_retention, "enabled", True):
+            return []
+
+        rules = getattr(config_retention, "rules", []) or []
+        if not rules:
+            return []
+
+        from src.tools.config_line_retention_checker import ConfigLineRetentionChecker
+
+        checker = ConfigLineRetentionChecker(self.git_tool.repo_path)
+        violations = checker.check(rules)
+
+        issues: list[JudgeIssue] = []
+        for v in violations:
+            issues.append(
+                JudgeIssue(
+                    file_path=v.file_path,
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="config_retention_violation",
+                    description=(
+                        f"Config retention violation in '{v.file_path}' "
+                        f"(rule glob: '{v.rule_file_glob}'): "
+                        f"missing required patterns: "
+                        f"{', '.join(v.missing_patterns[:5])}"
+                        f"{'...' if len(v.missing_patterns) > 5 else ''}"
+                    ),
+                    must_fix_before_merge=True,
+                    veto_condition="Config retention required line missing",
+                )
+            )
         return issues
 
     def _check_cross_layer_assertions(
