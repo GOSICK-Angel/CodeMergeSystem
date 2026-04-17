@@ -13,9 +13,61 @@ from src.cli.env import load_env
 console = Console()
 
 
-@click.group()
+class _DefaultGroup(click.Group):
+    """Forwards unrecognised first arguments to the 'merge' subcommand.
+
+    Lets users type `merge upstream/main` without the explicit 'merge'
+    token while keeping all named subcommands (run, resume, …) unchanged.
+    """
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        try:
+            return super().resolve_command(ctx, args)
+        except click.UsageError:
+            merge_cmd = self.commands.get("merge")
+            if merge_cmd is not None:
+                return "merge", merge_cmd, args
+            raise
+
+
+@click.group(cls=_DefaultGroup)
 def cli() -> None:
     load_env()
+
+
+@cli.command("merge")
+@click.argument("target_branch")
+@click.option(
+    "--ci", is_flag=True, help="CI mode: no interaction, JSON summary to stdout"
+)
+@click.option("--no-tui", is_flag=True, help="Disable interactive TUI")
+@click.option("--dry-run", is_flag=True, help="Analyze only, do not merge")
+@click.option("--ws-port", default=8765, type=int, help="WebSocket port for TUI bridge")
+@click.option("--reconfigure", "-r", is_flag=True, help="Force reconfiguration wizard")
+def merge_command(
+    target_branch: str,
+    ci: bool,
+    no_tui: bool,
+    dry_run: bool,
+    ws_port: int,
+    reconfigure: bool,
+) -> None:
+    """Merge TARGET_BRANCH into the current branch (one-stop flow)."""
+    from src.cli.commands.setup import detect_or_setup
+
+    config = detect_or_setup(target_branch, repo_path=".", reconfigure=reconfigure)
+
+    if not ci and not no_tui:
+        from src.cli.commands.tui import tui_command_impl
+
+        tui_command_impl(config, ws_port, dry_run)
+        return
+
+    from src.cli.commands.run import run_command_impl
+
+    run_command_impl(config, dry_run, ci=ci)
 
 
 @cli.command("run")
@@ -118,7 +170,11 @@ def report_command(run_id: str, output: str) -> None:
 
 @cli.command("init")
 def init_command() -> None:
-    """Interactive setup wizard for config and API keys"""
+    """Interactive setup wizard for config and API keys (deprecated: use `merge <branch>`)"""
+    console.print(
+        "[yellow]Deprecated:[/yellow] `merge init` is deprecated. "
+        "Use `merge <target-branch>` for guided setup."
+    )
     from src.cli.commands.init import init_command_impl
 
     init_command_impl()

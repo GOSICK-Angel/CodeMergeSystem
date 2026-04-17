@@ -22,13 +22,23 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-def tui_command_impl(config_path: str, ws_port: int, dry_run: bool = False) -> None:
-    """Launch the React Ink TUI alongside the merge orchestrator."""
-    config_file = Path(config_path)
-    raw_config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    merge_config = MergeConfig.model_validate(raw_config)
-    state = MergeState(config=merge_config)
+def tui_command_impl(
+    config_path_or_config: str | MergeConfig,
+    ws_port: int,
+    dry_run: bool = False,
+) -> None:
+    """Launch the React Ink TUI alongside the merge orchestrator.
 
+    Accepts either a file path string or an already-constructed MergeConfig.
+    """
+    if isinstance(config_path_or_config, MergeConfig):
+        merge_config = config_path_or_config
+    else:
+        config_file = Path(config_path_or_config)
+        raw_config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        merge_config = MergeConfig.model_validate(raw_config)
+
+    state = MergeState(config=merge_config)
     asyncio.run(_run_tui(state, merge_config, ws_port))
 
 
@@ -46,7 +56,12 @@ async def _run_tui(
         bridge.notify_state_change(reason)
 
     orchestrator.state_machine.add_observer(_on_transition)
-    orchestrator.set_activity_callback(bridge.notify_agent_activity)
+
+    def _on_activity(agent: str, action: str) -> None:
+        bridge.notify_agent_activity(agent, action)
+        bridge.notify_state_change(f"{agent}: {action}")
+
+    orchestrator.set_activity_callback(_on_activity)
 
     tui_stdout_fd = os.dup(sys.stdout.fileno())
     tui_proc = _spawn_tui_process(ws_port, tui_stdout_fd)
@@ -63,7 +78,14 @@ async def _run_tui(
             if state.status.value != "awaiting_human":
                 break
 
-            await bridge.wait_for_plan_review()
+            has_pending_conflicts = any(
+                req.human_decision is None
+                for req in state.human_decision_requests.values()
+            )
+            if has_pending_conflicts:
+                await bridge.wait_for_human_decisions()
+            else:
+                await bridge.wait_for_plan_review()
             await bridge.broadcast_state_patch()
 
         if tui_proc and tui_proc.poll() is None:

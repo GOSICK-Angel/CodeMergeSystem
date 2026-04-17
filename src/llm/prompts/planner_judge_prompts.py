@@ -1,13 +1,37 @@
+from __future__ import annotations
+
 from src.models.plan import MergePlan
-from src.models.diff import FileDiff
+from src.models.diff import FileDiff, RiskLevel
+from src.models.plan_judge import PlanIssue
+from src.models.plan_review import PlannerIssueResponse, IssueResponseAction
 
 
-_PLANNER_JUDGE_SYSTEM_BASE = """You are an independent reviewer of code merge plans. Your task is to find
-risks that may be underestimated in the plan, incorrect file classifications, missing security-sensitive files,
-and batch granularity issues.
-You do not know the Planner's reasoning process; you only see the final plan and the raw diff, and draw independent conclusions.
-When you find issues, you must point out specific file paths and specific reasons. Vague descriptions are not allowed.
-Be critical and thorough.
+_PLANNER_JUDGE_SYSTEM_BASE = """You are an independent reviewer of code merge plans. Your task is to verify that \
+high-risk files are correctly classified — NOT to find as many issues as possible.
+
+## When to raise an issue
+
+Only raise an issue when you have CONCRETE evidence from the diff data:
+- `conflict_count > 0` → file may need `human_required`
+- `is_security_sensitive = true` → file must be `human_required` or `auto_risky` at minimum
+- A file is obviously security-related (auth, crypto, secrets, permissions) but classified `auto_safe`
+- Batch grouping creates a dangerous ordering dependency (specific files must be named)
+
+## When NOT to raise an issue
+
+- File has `conflict_count = 0` AND `is_security_sensitive = false` → its `auto_safe` classification is almost certainly correct; do NOT suggest upgrading it
+- File has a large diff but no conflicts → `auto_risky` is acceptable; do NOT escalate to `human_required`
+- You are uncertain or the concern is hypothetical → stay silent; do not flag speculatively
+
+## Calibration
+
+A well-formed plan for a typical merge will have most files as `auto_safe`. If you find yourself flagging \
+more than 20% of files, reconsider — you are likely being too aggressive.
+
+IMPORTANT: When prior review rounds are shown, focus ONLY on:
+1. Issues that were NOT resolved by the Planner (still open).
+2. NEW issues you discover that were not raised before.
+Do NOT re-raise issues that have already been resolved. If all prior issues are resolved and no new issues are found, approve the plan.
 
 IMPORTANT: You MUST respond with ONLY a single JSON object. No markdown, no explanations, no text before or after the JSON.
 Your entire response must be valid JSON that can be parsed by json.loads()."""
@@ -42,8 +66,149 @@ def _build_file_manifest(file_diffs: list[FileDiff]) -> str:
     return "\n".join(lines)
 
 
+def classify_prior_issues(
+    prior_issues: list[PlanIssue],
+    current_classifications: dict[str, RiskLevel],
+) -> tuple[list[PlanIssue], list[PlanIssue]]:
+    resolved: list[PlanIssue] = []
+    still_open: list[PlanIssue] = []
+    for issue in prior_issues:
+        current_rl = current_classifications.get(issue.file_path)
+        if current_rl == issue.suggested_classification:
+            resolved.append(issue)
+        else:
+            still_open.append(issue)
+    return resolved, still_open
+
+
+def _build_prior_issues_section(
+    resolved: list[PlanIssue],
+    still_open: list[PlanIssue],
+    revision_round: int,
+    lang: str,
+) -> str:
+    if not resolved and not still_open:
+        return ""
+
+    if lang == "zh":
+        header = f"\n## 前轮审查历史（当前为第 {revision_round} 轮）\n"
+        resolved_hdr = "### ✅ 已解决（无需重复提出）\n"
+        open_hdr = "### ❌ 仍未解决（仍需关注）\n"
+        none_str = "无\n"
+        focus = (
+            "\n⚠️ 重点提示：已解决的问题请勿重复提出。"
+            "仅报告上方「仍未解决」列表中的问题和你新发现的问题。\n"
+        )
+    else:
+        header = f"\n## Prior Review History (this is round {revision_round})\n"
+        resolved_hdr = "### ✅ Resolved (do NOT re-raise)\n"
+        open_hdr = "### ❌ Still Open (still need attention)\n"
+        none_str = "None\n"
+        focus = (
+            "\n⚠️ FOCUS: Do NOT re-raise resolved issues. "
+            "Only report issues from the 'Still Open' list above and any NEW issues you discover.\n"
+        )
+
+    lines = [header]
+
+    lines.append(resolved_hdr)
+    if resolved:
+        for iss in resolved:
+            lines.append(
+                f"  - `{iss.file_path}`: {iss.current_classification.value} → "
+                f"{iss.suggested_classification.value} ✔\n"
+            )
+    else:
+        lines.append(none_str)
+
+    lines.append(open_hdr)
+    if still_open:
+        for iss in still_open:
+            lines.append(
+                f"  - `{iss.file_path}`: requested {iss.current_classification.value} → "
+                f"{iss.suggested_classification.value}, still at "
+                f"{iss.current_classification.value}\n"
+            )
+    else:
+        lines.append(none_str)
+
+    lines.append(focus)
+    return "".join(lines)
+
+
+def _build_planner_responses_section(
+    planner_responses: list[PlannerIssueResponse],
+    lang: str,
+) -> str:
+    if not planner_responses:
+        return ""
+
+    rejected = [r for r in planner_responses if r.action == IssueResponseAction.REJECT]
+    discussed = [
+        r for r in planner_responses if r.action == IssueResponseAction.DISCUSS
+    ]
+    accepted = [r for r in planner_responses if r.action == IssueResponseAction.ACCEPT]
+
+    if lang == "zh":
+        header = "\n## Planner 对你上轮建议的回应\n"
+        acc_hdr = f"### ✅ 已接受 ({len(accepted)} 条)\n"
+        rej_hdr = (
+            f"### ❌ 已拒绝 ({len(rejected)} 条) — 请评估 Planner 的理由是否成立\n"
+        )
+        disc_hdr = f"### 💬 需讨论 ({len(discussed)} 条) — Planner 提出了替代方案\n"
+        focus = (
+            "\n⚠️ 重点：对于 Planner 已接受的建议，无需再次提出。"
+            "对于被拒绝的建议，如果 Planner 的理由成立则放弃该建议；"
+            "如果你仍然认为存在风险，请给出更具体的证据。"
+            "对于讨论中的建议，评估 Planner 的替代方案是否可接受。\n"
+        )
+    else:
+        header = "\n## Planner's Responses to Your Prior Suggestions\n"
+        acc_hdr = f"### ✅ Accepted ({len(accepted)} items)\n"
+        rej_hdr = f"### ❌ Rejected ({len(rejected)} items) — evaluate if Planner's reasoning holds\n"
+        disc_hdr = f"### 💬 Under Discussion ({len(discussed)} items) — Planner proposed alternatives\n"
+        focus = (
+            "\n⚠️ FOCUS: Do NOT re-raise accepted items. "
+            "For rejected items, if the Planner's reasoning is sound, drop the issue; "
+            "if you still see risk, provide more specific evidence. "
+            "For discussed items, evaluate whether the counter-proposal is acceptable.\n"
+        )
+
+    lines = [header]
+
+    lines.append(acc_hdr)
+    for r in accepted:
+        lines.append(f"  - `{r.file_path}`: {r.reason}\n")
+    if not accepted:
+        lines.append("None\n")
+
+    lines.append(rej_hdr)
+    for r in rejected:
+        cp = f" | Counter: {r.counter_proposal}" if r.counter_proposal else ""
+        lines.append(f"  - `{r.file_path}`: {r.reason}{cp}\n")
+    if not rejected:
+        lines.append("None\n")
+
+    lines.append(disc_hdr)
+    for r in discussed:
+        cp = f" | Proposal: {r.counter_proposal}" if r.counter_proposal else ""
+        lines.append(f"  - `{r.file_path}`: {r.reason}{cp}\n")
+    if not discussed:
+        lines.append("None\n")
+
+    lines.append(focus)
+    return "".join(lines)
+
+
 def build_plan_review_prompt(
-    plan: MergePlan, file_diffs: list[FileDiff], lang: str = "en"
+    plan: MergePlan,
+    file_diffs: list[FileDiff],
+    lang: str = "en",
+    *,
+    revision_round: int = 0,
+    prior_resolved: list[PlanIssue] | None = None,
+    prior_still_open: list[PlanIssue] | None = None,
+    planner_responses: list[PlannerIssueResponse] | None = None,
 ) -> str:
     phases_summary = "\n".join(
         f"  Phase {batch.phase.value}: {len(batch.file_paths)} files ({batch.risk_level.value})"
@@ -51,6 +216,21 @@ def build_plan_review_prompt(
     )
 
     manifest = _build_file_manifest(file_diffs)
+
+    prior_section = ""
+    if revision_round > 0:
+        prior_section = _build_prior_issues_section(
+            prior_resolved or [],
+            prior_still_open or [],
+            revision_round,
+            lang,
+        )
+
+    planner_response_section = ""
+    if revision_round > 0 and planner_responses:
+        planner_response_section = _build_planner_responses_section(
+            planner_responses, lang
+        )
 
     return f"""Review the following merge plan for quality and correctness.
 
@@ -67,12 +247,14 @@ def build_plan_review_prompt(
 
 ## All Files (path: classification [flags])
 {manifest}
-
-## Your Review Tasks
-1. Check if any security-sensitive files are incorrectly classified as auto_safe
-2. Check if high-conflict files are correctly classified
-3. Check if any deleted files should require human review
-4. Check if batch granularity is appropriate
+{prior_section}{planner_response_section}
+## Your Review Tasks (raise issues ONLY with concrete evidence)
+1. Files where `is_security_sensitive=true` but classified below `auto_risky` → flag
+2. Files where `conflict_count > 0` but NOT classified `human_required` → flag
+3. Files that are obviously security-critical by name/path but classified `auto_safe` → flag
+4. Dangerous batch ordering that would break a dependency → flag (name both files)
+5. Files with `conflict_count=0` and `is_security_sensitive=false` → do NOT flag regardless of diff size
+{"6. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
 
 Return JSON with:
 {{

@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from src.cli.paths import get_plans_dir
 from src.models.diff import FileChangeCategory, RiskLevel
 from src.models.state import MergeState
 
@@ -18,8 +19,7 @@ def write_merge_plan_report(state: MergeState) -> Path:
 
     Returns the path of the generated file.
     """
-    repo_path = Path(state.config.repo_path).resolve()
-    record_dir = repo_path / "MERGE_RECORD"
+    record_dir = get_plans_dir(state.config.repo_path)
     record_dir.mkdir(parents=True, exist_ok=True)
 
     upstream = state.config.upstream_ref.replace("/", "_")
@@ -42,11 +42,12 @@ def write_merge_plan_report(state: MergeState) -> Path:
 def _build_report(state: MergeState, lang: str) -> list[str]:
     zh = lang == "zh"
     plan = state.merge_plan
-    file_diffs = getattr(state, "_file_diffs", None) or []
+    file_diffs = state.file_diffs
 
     lines: list[str] = []
 
     _header(lines, state, zh)
+    _migration_section(lines, state, zh)
     _classification_summary(lines, state, zh)
     _directory_matrix(lines, state, zh)
     _risk_files(lines, file_diffs, zh)
@@ -92,6 +93,63 @@ def _header(lines: list[str], state: MergeState, zh: bool) -> None:
         ]
 
     lines += ["", "---", ""]
+
+
+def _migration_section(lines: list[str], state: MergeState, zh: bool) -> None:
+    info = state.migration_info
+    if info is None or not info.detected:
+        return
+
+    title = "迁移检测" if zh else "Migration Detection"
+    lines += [
+        f"## {title}",
+        "",
+    ]
+
+    if zh:
+        lines += [
+            f"- **检测结果**: 检测到代码迁移 (置信度 {info.confidence:.0%})",
+            f"- **同步文件数**: {info.synced_file_count} / {info.upstream_changed_file_count}"
+            f" ({info.sync_ratio:.0%})",
+            f"- **有效合并基准**: `{info.effective_merge_base[:12]}`",
+            f"- **Git 合并基准**: `{info.git_merge_base[:12]}`",
+            f"- **跳过的提交数**: {info.skipped_commit_count}",
+        ]
+    else:
+        lines += [
+            f"- **Detection**: Migration detected (confidence {info.confidence:.0%})",
+            f"- **Synced files**: {info.synced_file_count} / {info.upstream_changed_file_count}"
+            f" ({info.sync_ratio:.0%})",
+            f"- **Effective merge-base**: `{info.effective_merge_base[:12]}`",
+            f"- **Git merge-base**: `{info.git_merge_base[:12]}`",
+            f"- **Skipped commits**: {info.skipped_commit_count}",
+        ]
+
+    if info.last_synced_commit:
+        label = "最后同步提交" if zh else "Last synced commit"
+        lines.append(f"- **{label}**: `{info.last_synced_commit[:12]}`")
+
+    if info.first_unsynced_commit:
+        label = "首个未同步提交" if zh else "First unsynced commit"
+        lines.append(f"- **{label}**: `{info.first_unsynced_commit[:12]}`")
+
+    override_label = "手动覆盖" if zh else "Override"
+    override_hint = (
+        "如果检测不准确，可在配置中设置"
+        if zh
+        else "If detection is inaccurate, set in config"
+    )
+    lines += [
+        "",
+        f"> **{override_label}**: {override_hint}:",
+        "> ```yaml",
+        "> migration:",
+        f'>   merge_base_override: "{info.effective_merge_base}"',
+        "> ```",
+        "",
+        "---",
+        "",
+    ]
 
 
 def _classification_summary(lines: list[str], state: MergeState, zh: bool) -> None:

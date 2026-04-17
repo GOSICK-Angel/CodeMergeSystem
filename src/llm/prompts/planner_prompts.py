@@ -49,8 +49,33 @@ Project context:
 Changed files ({len(file_diffs)} total):
 {file_list}
 
+## Classification Rules (apply strictly in order)
+
+**auto_safe** — DEFAULT for most files. Use when ALL of:
+  - conflicts = 0
+  - security_sensitive = false
+  - lines_added + lines_deleted < 200
+  - Routine changes: deps, config, docs, tests, minor refactors
+
+**auto_risky** — Use ONLY when there is a specific reason despite no conflicts:
+  - Large diffs (lines_added + lines_deleted >= 200) touching shared interfaces
+  - Cross-cutting changes that affect many callers
+  - Database schema or migration files (even without conflicts)
+
+**human_required** — Use ONLY when at least ONE of:
+  - conflicts > 0  (actual merge conflict markers present)
+  - security_sensitive = true  (auth, crypto, secrets, permissions)
+  - Core business logic with both sides making semantic changes
+
+**deleted_only** — file_status is deleted, no conflicts
+**binary** — binary files (images, compiled artifacts)
+**excluded** — generated files, lock files, .gitignore patterns
+
+⚠️  BIAS TOWARD AUTO_SAFE. When in doubt between auto_safe and auto_risky, choose auto_safe.
+⚠️  NEVER use human_required for a file with conflicts=0 and security_sensitive=false unless it is core business logic with clear semantic conflict.
+
 Create a phased merge plan with the following structure:
-1. Classify each file by risk level
+1. Classify each file by risk level using the rules above
 2. Group files into batches by phase
 3. Summarize risk distribution
 
@@ -128,3 +153,75 @@ Instructions:
 2. Do NOT change classifications of files not listed in the issues.
 3. Recalculate risk_summary counts after reclassification.
 4. Return the complete revised plan in the same JSON format as the original plan."""
+
+
+PLANNER_EVALUATION_SYSTEM = """You are a code merge planning expert evaluating reviewer feedback on your merge plan.
+For each issue raised by the reviewer, you must independently assess whether it is valid based on
+the file's actual characteristics (diff size, conflict count, security sensitivity, language).
+You are allowed to REJECT suggestions you disagree with — provide a clear technical reason.
+Respond with ONLY a JSON object. No markdown, no extra text."""
+
+
+def build_evaluation_prompt(
+    plan: MergePlan,
+    judge_issues: list[PlanIssue],
+    lang: str = "en",
+) -> str:
+    capped = judge_issues[:MAX_REVISION_ISSUES]
+
+    issues_text = "\n".join(
+        f"- issue_id: {issue.issue_id}\n"
+        f"  file_path: {issue.file_path}\n"
+        f"  current_classification: {issue.current_classification.value}\n"
+        f"  suggested_classification: {issue.suggested_classification.value}\n"
+        f"  reason: {issue.reason}\n"
+        f"  issue_type: {issue.issue_type}"
+        for issue in capped
+    )
+
+    phases_text = "\n".join(
+        f"- Batch {b.batch_id}: phase={b.phase.value}, "
+        f"risk_level={b.risk_level.value}, "
+        f"files={len(b.file_paths)}"
+        for b in plan.phases
+    )
+
+    lang_note = ""
+    if lang == "zh":
+        lang_note = '\n\nIMPORTANT: All "reason" and "counter_proposal" fields MUST be written in Chinese.'
+
+    return f"""The plan reviewer has raised the following issues about your merge plan.
+Evaluate each issue independently. You may accept, reject, or request discussion.
+
+## Your Current Plan
+- Total files: {plan.risk_summary.total_files}
+- Auto-safe: {plan.risk_summary.auto_safe_count}
+- Auto-risky: {plan.risk_summary.auto_risky_count}
+- Human required: {plan.risk_summary.human_required_count}
+
+Phases:
+{phases_text}
+
+## Reviewer Issues
+{issues_text}
+
+## Instructions
+For EACH issue, decide:
+- "accept": You agree the file should be reclassified as suggested. State why you agree.
+- "reject": You disagree and want to keep the current classification. Give a clear technical reason.
+- "discuss": You partially agree or need clarification. Propose an alternative.
+
+Return JSON:
+{{
+  "responses": [
+    {{
+      "issue_id": "<from above>",
+      "file_path": "<file_path>",
+      "action": "accept" | "reject" | "discuss",
+      "reason": "Your technical reasoning",
+      "counter_proposal": "Only for discuss — your alternative suggestion (null otherwise)"
+    }}
+  ]
+}}{lang_note}
+
+Respond with ONLY the JSON object."""

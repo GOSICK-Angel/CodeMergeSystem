@@ -1,14 +1,17 @@
+from __future__ import annotations
+
 from src.agents.base_agent import BaseAgent
 from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage, MessageType
 from src.models.plan import MergePlan, MergePhase
 from src.models.diff import FileDiff
-from src.models.plan_judge import PlanJudgeVerdict
+from src.models.plan_judge import PlanIssue, PlanJudgeVerdict
 from src.models.state import MergeState
 from src.llm.prompts.planner_judge_prompts import (
     get_planner_judge_system,
     build_plan_review_prompt,
 )
+from src.models.plan_review import PlannerIssueResponse
 from src.llm.response_parser import parse_plan_judge_verdict
 
 
@@ -22,9 +25,7 @@ class PlannerJudgeAgent(BaseAgent):
         if state.merge_plan is None:
             raise ValueError("No merge plan to review")
 
-        file_diffs: list[FileDiff] = []
-        if hasattr(state, "_file_diffs"):
-            file_diffs = state._file_diffs or []
+        file_diffs: list[FileDiff] = state.file_diffs
 
         lang = state.config.output.language
         verdict = await self.review_plan(state.merge_plan, file_diffs, 0, lang=lang)
@@ -44,17 +45,28 @@ class PlannerJudgeAgent(BaseAgent):
         file_diffs: list[FileDiff],
         revision_round: int,
         lang: str = "en",
+        *,
+        prior_resolved: list[PlanIssue] | None = None,
+        prior_still_open: list[PlanIssue] | None = None,
+        planner_responses: list[PlannerIssueResponse] | None = None,
     ) -> PlanJudgeVerdict:
-        prompt = build_plan_review_prompt(plan, file_diffs, lang=lang)
-
-        if revision_round > 0:
-            prompt = f"[Revision round {revision_round}]\n\n" + prompt
+        prompt = build_plan_review_prompt(
+            plan,
+            file_diffs,
+            lang=lang,
+            revision_round=revision_round,
+            prior_resolved=prior_resolved,
+            prior_still_open=prior_still_open,
+            planner_responses=planner_responses,
+        )
 
         messages = [{"role": "user", "content": prompt}]
 
         system = get_planner_judge_system(lang)
         try:
-            raw = await self._call_llm_with_retry(messages, system=system)
+            raw = await self._call_llm_with_retry(
+                messages, system=system, json_mode=True
+            )
             return parse_plan_judge_verdict(
                 str(raw), self.llm_config.model, revision_round
             )
@@ -63,13 +75,14 @@ class PlannerJudgeAgent(BaseAgent):
             from src.models.plan_judge import PlanJudgeResult
             from datetime import datetime
 
+            error_type = type(e).__name__
             return PlanJudgeVerdict(
                 result=PlanJudgeResult.REVISION_NEEDED,
                 revision_round=revision_round,
                 issues=[],
                 approved_files_count=0,
                 flagged_files_count=0,
-                summary=f"Review parse failed (raw response could not be parsed as JSON): {e}",
+                summary=f"Review parse failed ({error_type}): {e}",
                 judge_model=self.llm_config.model,
                 timestamp=datetime.now(),
             )

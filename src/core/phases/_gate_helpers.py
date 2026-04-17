@@ -147,6 +147,7 @@ def append_execution_record(
     phase_id: str,
     phase_result: object,
     files_processed: int,
+    commit_sha: str | None = None,
 ) -> None:
     from src.models.plan import MergePlanLive, PhaseExecutionRecord
     from src.models.state import PhaseResult as PR
@@ -162,6 +163,7 @@ def append_execution_record(
             started_at=phase_result.started_at or datetime.now(),
             completed_at=phase_result.completed_at,
             files_processed=files_processed,
+            commit_hash=commit_sha,
         )
     )
 

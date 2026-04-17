@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 
-export function useElapsed(startIso: string | null): number {
+export function useElapsed(startIso: string | null, intervalMs = 10_000): number {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -9,9 +9,9 @@ export function useElapsed(startIso: string | null): number {
 
     const tick = () => setElapsed(Date.now() - startMs);
     tick();
-    const interval = setInterval(tick, 1000);
+    const interval = setInterval(tick, intervalMs);
     return () => clearInterval(interval);
-  }, [startIso]);
+  }, [startIso, intervalMs]);
 
   return elapsed;
 }

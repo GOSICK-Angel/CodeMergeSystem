@@ -207,11 +207,85 @@ export interface MergeMemory {
   entries: { key: string; value: string; phase: string }[];
 }
 
+export interface PlannerIssueResponse {
+  issue_id: string;
+  file_path: string;
+  action: "accept" | "reject" | "discuss";
+  reason: string;
+  counter_proposal: string | null;
+}
+
+export interface PlanDiffEntry {
+  file_path: string;
+  old_risk: string;
+  new_risk: string;
+}
+
+export interface NegotiationMessage {
+  sender: string;
+  round_number: number;
+  content: string;
+  timestamp: string;
+}
+
+export interface IssueDetail {
+  file_path: string;
+  reason: string;
+  current: string;
+  suggested: string;
+}
+
 export interface PlanReviewRound {
   round_number: number;
   verdict_result: string;
   verdict_summary: string;
   issues_count: number;
+  issues_detail: IssueDetail[];
+  planner_revision_summary: string | null;
+  planner_responses: PlannerIssueResponse[];
+  plan_diff: PlanDiffEntry[];
+  negotiation_messages: NegotiationMessage[];
+  timestamp: string;
+}
+
+export type ReviewConclusionReason =
+  | "approved"
+  | "max_rounds"
+  | "stalled"
+  | "llm_failure"
+  | "critical_replan";
+
+export interface RejectionDetail {
+  file_path: string;
+  judge_suggested: string;
+  planner_reason: string;
+}
+
+export interface ReviewConclusion {
+  reason: ReviewConclusionReason;
+  final_round: number;
+  total_rounds: number;
+  max_rounds: number;
+  summary: string;
+  pending_decisions_count: number;
+  rejection_details: RejectionDetail[];
+}
+
+export interface DecisionOption {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface UserDecisionItem {
+  item_id: string;
+  file_path: string;
+  description: string;
+  risk_context: string;
+  current_classification: string;
+  options: DecisionOption[];
+  user_choice: string | null;
+  user_input: string | null;
 }
 
 export type ScreenId =

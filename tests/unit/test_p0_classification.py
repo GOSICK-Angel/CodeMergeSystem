@@ -403,7 +403,7 @@ class TestPlannerLayeredPlan:
             is_security_sensitive=True,
             change_category=FileChangeCategory.C,
         )
-        object.__setattr__(state, "_file_diffs", [fd_core, fd_docker, fd_service])
+        state.file_diffs = [fd_core, fd_docker, fd_service]
 
         plan = planner._build_layered_plan([fd_core, fd_docker, fd_service], state)
 

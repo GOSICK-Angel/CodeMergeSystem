@@ -28,6 +28,7 @@ import src.agents.executor_agent  # noqa: F401
 import src.agents.judge_agent  # noqa: F401
 import src.agents.human_interface_agent  # noqa: F401
 
+from src.cli.paths import ensure_merge_dir, get_run_dir, get_system_log_dir, is_dev_mode
 from src.core.checkpoint import Checkpoint
 from src.core.message_bus import MessageBus
 from src.core.phase_runner import PhaseRunner
@@ -126,7 +127,10 @@ class Orchestrator:
         self.gate_runner = GateRunner(Path(config.repo_path).resolve())
         self.state_machine = StateMachine()
         self.message_bus = MessageBus()
-        self.checkpoint = Checkpoint(config.output.debug_directory)
+        run_dir = Path(config.output.debug_directory) / "checkpoints"
+        self.checkpoint = Checkpoint(
+            run_dir, debug_checkpoints=config.output.debug_checkpoints
+        )
         self.phase_runner = PhaseRunner(batch_size=10, max_concurrency=5)
 
         # --- agents (B3: registry-based creation with DI override) ---
@@ -169,6 +173,14 @@ class Orchestrator:
         self._on_activity = cb
 
     async def run(self, state: MergeState) -> MergeState:
+        # Re-initialize checkpoint with the per-run directory now that run_id is known.
+        run_dir = get_run_dir(self.config.repo_path, state.run_id)
+        self.checkpoint = Checkpoint(
+            run_dir, debug_checkpoints=self.config.output.debug_checkpoints
+        )
+        if not is_dev_mode():
+            ensure_merge_dir(self.config.repo_path)
+
         self._setup_run_logger(state.run_id)
         logger.info("=== Merge run %s started ===", state.run_id)
         logger.info(
@@ -323,9 +335,9 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _setup_run_logger(self, run_id: str) -> Path:
-        debug_dir = Path(self.config.output.debug_directory)
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        log_path = debug_dir / f"run_{run_id}.log"
+        log_dir = get_system_log_dir(self.config.repo_path)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"run_{run_id}.log"
 
         formatter = logging.Formatter(
             "%(asctime)s [%(name)s] %(levelname)s %(message)s",
@@ -345,12 +357,12 @@ class Orchestrator:
         self._log_handler = handler
 
         if self.config.output.structured_logs:
-            structured_path = str(debug_dir / f"run_{run_id}.jsonl")
+            structured_path = str(log_dir / f"run_{run_id}.jsonl")
             self._structured_handler = create_structured_handler(structured_path)
             root.addHandler(self._structured_handler)
 
         if self.config.output.include_llm_traces:
-            self._trace_logger = TraceLogger(str(debug_dir), run_id)
+            self._trace_logger = TraceLogger(str(log_dir), run_id)
             for agent in self._all_agents:
                 agent.set_trace_logger(self._trace_logger)
 

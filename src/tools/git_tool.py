@@ -122,6 +122,91 @@ class GitTool:
         except git.GitCommandError:
             return []
 
+    def list_commits(self, base: str, head: str) -> list[dict[str, str | list[str]]]:
+        try:
+            log_output = self.repo.git.log(
+                "--topo-order",
+                "--reverse",
+                "--format=%H|%an|%ae|%ai|%s",
+                f"{base}..{head}",
+            )
+        except git.GitCommandError:
+            return []
+        commits: list[dict[str, str | list[str]]] = []
+        for line in log_output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("|", 4)
+            if len(parts) < 5:
+                continue
+            sha = parts[0]
+            files = self.get_commit_files(sha)
+            commits.append(
+                {
+                    "sha": sha,
+                    "author_name": parts[1],
+                    "author_email": parts[2],
+                    "date": parts[3],
+                    "message": parts[4],
+                    "files": files,
+                }
+            )
+        return commits
+
+    def get_commit_files(self, sha: str) -> list[str]:
+        try:
+            output = self.repo.git.diff_tree("--no-commit-id", "--name-only", "-r", sha)
+            return [f.strip() for f in output.splitlines() if f.strip()]
+        except git.GitCommandError:
+            return []
+
+    def get_commit_patch_id(self, sha: str) -> str | None:
+        """Return the patch-id for a commit's diff (content hash ignoring metadata)."""
+        try:
+            diff_output = self.repo.git.diff_tree("-p", sha)
+            if not diff_output.strip():
+                return None
+            pid_output = self.repo.git.patch_id(input=diff_output)
+            return pid_output.split()[0] if pid_output.strip() else None
+        except git.GitCommandError:
+            return None
+
+    def get_diff_patch_id(self, base: str, head: str, file_path: str) -> str | None:
+        """Return the patch-id for a specific file diff between two refs."""
+        try:
+            diff_output = self.repo.git.diff(base, head, "--", file_path)
+            if not diff_output.strip():
+                return None
+            pid_output = self.repo.git.patch_id(input=diff_output)
+            return pid_output.split()[0] if pid_output.strip() else None
+        except git.GitCommandError:
+            return None
+
+    def cherry_pick(self, sha: str) -> bool:
+        try:
+            self.repo.git.cherry_pick(sha)
+            return True
+        except git.GitCommandError:
+            return False
+
+    def cherry_pick_abort(self) -> None:
+        try:
+            self.repo.git.cherry_pick("--abort")
+        except git.GitCommandError:
+            pass
+
+    def commit_staged(self, message: str) -> str:
+        commit = self.repo.index.commit(message)
+        return str(commit.hexsha)
+
+    def stage_files(self, file_paths: list[str]) -> None:
+        if file_paths:
+            self.repo.index.add(file_paths)
+
+    def has_staged_changes(self) -> bool:
+        return len(self.repo.index.diff("HEAD")) > 0
+
     def list_files_with_hashes(self, ref: str) -> dict[str, str]:
         """Return {file_path: blob_hash} for all files at *ref* in one call."""
         try:

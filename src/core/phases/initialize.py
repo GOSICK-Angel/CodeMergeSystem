@@ -21,6 +21,8 @@ from src.tools.file_classifier import (
 )
 from src.tools.pollution_auditor import PollutionAuditor
 from src.tools.config_drift_detector import ConfigDriftDetector
+from src.tools.commit_replayer import CommitReplayer
+from src.tools.sync_point_detector import SyncPointDetector
 
 logger = logging.getLogger(__name__)
 
@@ -46,14 +48,44 @@ class InitializePhase(Phase):
         return PhaseOutcome(
             target_status=SystemStatus.PLANNING,
             reason="initialization complete",
+            checkpoint_tag="after_init",
         )
 
     def _run_sync(self, state: MergeState, ctx: PhaseContext) -> None:
         ctx.notify("orchestrator", "Computing merge base")
-        merge_base = ctx.git_tool.get_merge_base(
+        git_merge_base = ctx.git_tool.get_merge_base(
             state.config.upstream_ref, state.config.fork_ref
         )
-        object.__setattr__(state, "_merge_base", merge_base)
+        merge_base = git_merge_base
+
+        migration_cfg = state.config.migration
+        if migration_cfg.merge_base_override:
+            merge_base = migration_cfg.merge_base_override
+            logger.info("Using merge_base_override: %s", merge_base)
+        elif migration_cfg.auto_detect_sync_point:
+            ctx.notify("orchestrator", "Detecting migration sync-point")
+            detector = SyncPointDetector(
+                sync_ratio_threshold=migration_cfg.sync_detection_threshold,
+                min_synced_files=migration_cfg.min_synced_files,
+            )
+            result = detector.detect(
+                ctx.git_tool,
+                merge_base,
+                state.config.fork_ref,
+                state.config.upstream_ref,
+            )
+            state.migration_info = result
+            if result.detected:
+                logger.info(
+                    "Migration detected: %d/%d upstream-changed files synced "
+                    "(%.0f%%), effective merge-base: %s",
+                    result.synced_file_count,
+                    result.upstream_changed_file_count,
+                    result.sync_ratio * 100,
+                    result.effective_merge_base,
+                )
+                merge_base = result.effective_merge_base
+
         state.merge_base_commit = merge_base
 
         ctx.notify("orchestrator", "Classifying files (three-way)")
@@ -145,7 +177,27 @@ class InitializePhase(Phase):
             fd = fd.model_copy(update={"risk_level": risk_level})
             file_diffs.append(fd)
 
-        object.__setattr__(state, "_file_diffs", file_diffs)
+        state.file_diffs = file_diffs
+
+        if state.config.history.enabled:
+            ctx.notify("orchestrator", "Enumerating upstream commits for replay")
+            upstream_commits = ctx.git_tool.list_commits(
+                merge_base, state.config.upstream_ref
+            )
+            replayer = CommitReplayer()
+            replayable, non_replayable = replayer.classify_commits(
+                upstream_commits, file_categories
+            )
+            state.upstream_commits = upstream_commits
+            state.replayable_commits = replayable
+            state.non_replayable_commits = non_replayable
+            logger.info(
+                "Commit replay classification: %d replayable, %d non-replayable "
+                "out of %d total upstream commits",
+                len(replayable),
+                len(non_replayable),
+                len(upstream_commits),
+            )
 
         drift_detector = ConfigDriftDetector(Path(state.config.repo_path).resolve())
         env_files, docker_env_files = drift_detector.find_env_files()

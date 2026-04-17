@@ -284,18 +284,19 @@ class TestOpenAIClientComplete:
         result = await client.complete([{"role": "user", "content": "Hi"}])
         assert result == "Hello from OpenAI"
 
-    async def test_returns_empty_string_when_content_none(self):
+    async def test_raises_on_empty_content(self):
         client = _make_openai_client()
         mock_message = MagicMock()
         mock_message.content = None
         mock_choice = MagicMock()
         mock_choice.message = mock_message
+        mock_choice.finish_reason = "content_filter"
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
         client._client.chat.completions.create = AsyncMock(return_value=mock_response)
 
-        result = await client.complete([{"role": "user", "content": "Hi"}])
-        assert result == ""
+        with pytest.raises(RuntimeError, match="empty content"):
+            await client.complete([{"role": "user", "content": "Hi"}])
 
     async def test_prepends_system_message(self):
         client = _make_openai_client()

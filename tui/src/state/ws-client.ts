@@ -13,6 +13,9 @@ const THROTTLE_MS = 200;
 let pendingSnapshot: Record<string, unknown> | null = null;
 let throttleTimer: ReturnType<typeof setTimeout> | null = null;
 
+let pendingActivity: { agent: string; action: string } | null = null;
+let activityTimer: ReturnType<typeof setTimeout> | null = null;
+
 function flushPendingSnapshot() {
   if (pendingSnapshot) {
     const data = pendingSnapshot;
@@ -20,6 +23,14 @@ function flushPendingSnapshot() {
     useAppStore.getState().applySnapshot(data);
   }
   throttleTimer = null;
+}
+
+function flushPendingActivity() {
+  if (pendingActivity) {
+    useAppStore.getState().setAgentActivity(pendingActivity);
+    pendingActivity = null;
+  }
+  activityTimer = null;
 }
 
 export function connectWS(url: string, callbacks: WSCallbacks): () => void {
@@ -72,7 +83,10 @@ export function connectWS(url: string, callbacks: WSCallbacks): () => void {
         }
         break;
       case "agent_activity":
-        setAgentActivity(msg.payload as { agent: string; action: string });
+        pendingActivity = msg.payload as { agent: string; action: string };
+        if (!activityTimer) {
+          activityTimer = setTimeout(flushPendingActivity, THROTTLE_MS);
+        }
         break;
       case "phase_started":
         applyPatch({
@@ -89,6 +103,7 @@ export function connectWS(url: string, callbacks: WSCallbacks): () => void {
   return () => {
     if (reconnectTimer) clearTimeout(reconnectTimer);
     if (throttleTimer) clearTimeout(throttleTimer);
+    if (activityTimer) clearTimeout(activityTimer);
     if (ws) {
       ws.removeAllListeners();
       ws.close();

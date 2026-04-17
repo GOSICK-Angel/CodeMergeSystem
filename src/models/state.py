@@ -7,12 +7,17 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 from src.models.config import MergeConfig
 from src.models.plan import MergePlan, MergePhase
-from src.models.diff import RiskLevel, FileChangeCategory
+from src.models.diff import FileDiff, RiskLevel, FileChangeCategory
 from src.models.decision import MergeDecision, FileDecisionRecord
 from src.models.judge import JudgeVerdict
 from src.models.human import HumanDecisionRequest
 from src.models.plan_judge import PlanJudgeVerdict
-from src.models.plan_review import PlanReviewRound, PlanHumanReview
+from src.models.plan_review import (
+    PlanReviewRound,
+    PlanHumanReview,
+    UserDecisionItem,
+    ReviewConclusion,
+)
 from src.memory.models import MergeMemory
 from src.models.dispute import PlanDisputeRequest
 from src.models.conflict import ConflictAnalysis
@@ -21,6 +26,7 @@ from src.models.dependency import FileDependencyGraph
 if TYPE_CHECKING:
     from src.tools.config_drift_detector import ConfigDriftReport
     from src.tools.pollution_auditor import PollutionAuditReport
+    from src.tools.sync_point_detector import SyncPointResult
 
 
 class SystemStatus(str, Enum):
@@ -63,6 +69,8 @@ class MergeState(BaseModel):
     plan_judge_verdict: PlanJudgeVerdict | None = None
     plan_review_log: list[PlanReviewRound] = Field(default_factory=list)
     plan_human_review: PlanHumanReview | None = None
+    review_conclusion: ReviewConclusion | None = None
+    pending_user_decisions: list[UserDecisionItem] = Field(default_factory=list)
 
     file_decision_records: dict[str, FileDecisionRecord] = Field(default_factory=dict)
     applied_patches: list[str] = Field(default_factory=list)
@@ -86,6 +94,10 @@ class MergeState(BaseModel):
     gate_history: list[dict[str, Any]] = Field(default_factory=list)
     consecutive_gate_failures: int = 0
 
+    migration_info: SyncPointResult | None = Field(
+        default=None,
+        description="Migration detection results from SyncPointDetector.",
+    )
     pollution_audit: PollutionAuditReport | None = Field(
         default=None,
         description="PollutionAuditReport from Phase 0 pre-check",
@@ -97,6 +109,15 @@ class MergeState(BaseModel):
 
     memory: MergeMemory = Field(default_factory=MergeMemory)
     dependency_graph: FileDependencyGraph = Field(default_factory=FileDependencyGraph)
+
+    file_diffs: list[FileDiff] = Field(default_factory=list)
+    upstream_commits: list[dict[str, Any]] = Field(default_factory=list)
+    replayable_commits: list[dict[str, Any]] = Field(default_factory=list)
+    non_replayable_commits: list[dict[str, Any]] = Field(default_factory=list)
+
+    replayed_commits: list[str] = Field(default_factory=list)
+    replayed_files: list[str] = Field(default_factory=list)
+    merge_commit_log: list[dict[str, Any]] = Field(default_factory=list)
 
     errors: list[dict[str, Any]] = Field(default_factory=list)
     messages: list[dict[str, Any]] = Field(default_factory=list)
@@ -111,11 +132,13 @@ class MergeState(BaseModel):
 def _rebuild_state_model() -> None:
     from src.tools.config_drift_detector import ConfigDriftReport
     from src.tools.pollution_auditor import PollutionAuditReport
+    from src.tools.sync_point_detector import SyncPointResult
 
     MergeState.model_rebuild(
         _types_namespace={
             "ConfigDriftReport": ConfigDriftReport,
             "PollutionAuditReport": PollutionAuditReport,
+            "SyncPointResult": SyncPointResult,
         }
     )
 

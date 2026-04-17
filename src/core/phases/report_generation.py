@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from src.cli.paths import get_report_dir
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.models.plan import MergePhase
 from src.models.state import MergeState, PhaseResult, SystemStatus
@@ -27,7 +28,11 @@ class ReportGenerationPhase(Phase):
         )
         state.phase_results[MergePhase.REPORT.value] = phase_result
 
-        output_dir = state.config.output.directory
+        output_dir = str(
+            get_report_dir(
+                state.config.repo_path, state.run_id, state.config.output.directory
+            )
+        )
 
         try:
             cost_summary = ctx.cost_tracker.summary() if ctx.cost_tracker else None

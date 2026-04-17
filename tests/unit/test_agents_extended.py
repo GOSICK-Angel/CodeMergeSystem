@@ -144,7 +144,7 @@ class TestConflictAnalystAgent:
     def test_run_processes_high_risk_files(self):
         state = _make_state()
         fd = _make_file_diff("src/auth.py", RiskLevel.HUMAN_REQUIRED)
-        state._file_diffs = [fd]
+        state.file_diffs = [fd]
 
         batch = PhaseFileBatch(
             batch_id="b1",
@@ -168,7 +168,7 @@ class TestConflictAnalystAgent:
 
     def test_run_skips_files_not_in_diff_map(self):
         state = _make_state()
-        state._file_diffs = []
+        state.file_diffs = []
 
         batch = PhaseFileBatch(
             batch_id="b1",
@@ -187,7 +187,7 @@ class TestConflictAnalystAgent:
     def test_run_ignores_auto_safe_batches(self):
         state = _make_state()
         fd = _make_file_diff("src/utils.py", RiskLevel.AUTO_SAFE)
-        state._file_diffs = [fd]
+        state.file_diffs = [fd]
 
         batch = PhaseFileBatch(
             batch_id="b1",
@@ -207,7 +207,7 @@ class TestConflictAnalystAgent:
         state = _make_state()
         state._merge_base = "abc123"
         fd = _make_file_diff("src/auth.py", RiskLevel.AUTO_RISKY)
-        state._file_diffs = [fd]
+        state.file_diffs = [fd]
 
         batch = PhaseFileBatch(
             batch_id="b1",
@@ -360,7 +360,7 @@ class TestExecutorAgent:
     def test_run_processes_auto_safe_files(self):
         state = _make_state()
         fd = _make_file_diff("src/utils.py", RiskLevel.AUTO_SAFE)
-        state._file_diffs = [fd]
+        state.file_diffs = [fd]
 
         batch = PhaseFileBatch(
             batch_id="b1",
@@ -391,7 +391,7 @@ class TestExecutorAgent:
     def test_run_skips_human_required_files(self):
         state = _make_state()
         fd = _make_file_diff("src/auth.py", RiskLevel.HUMAN_REQUIRED)
-        state._file_diffs = [fd]
+        state.file_diffs = [fd]
 
         batch = PhaseFileBatch(
             batch_id="b1",
@@ -410,7 +410,7 @@ class TestExecutorAgent:
     def test_run_processes_deleted_only_with_skip_strategy(self):
         state = _make_state()
         fd = _make_file_diff("old.py", RiskLevel.DELETED_ONLY, FileStatus.DELETED)
-        state._file_diffs = [fd]
+        state.file_diffs = [fd]
 
         batch = PhaseFileBatch(
             batch_id="b1",
@@ -731,7 +731,7 @@ class TestExecutorAgent:
         state.current_phase = MergePhase.HUMAN_REVIEW
 
         fd = _make_file_diff("src/auth.py")
-        state._file_diffs = [fd]
+        state.file_diffs = [fd]
 
         request = _make_human_request(
             "src/auth.py", human_decision=MergeDecision.TAKE_TARGET
@@ -1029,7 +1029,7 @@ class TestPlannerAgent:
 
     def test_run_sets_merge_plan_on_state(self):
         state = _make_state()
-        state._file_diffs = [_make_file_diff("src/utils.py", RiskLevel.AUTO_SAFE)]
+        state.file_diffs = [_make_file_diff("src/utils.py", RiskLevel.AUTO_SAFE)]
 
         plan_json = json.dumps(
             {
@@ -1070,7 +1070,7 @@ class TestPlannerAgent:
 
     def test_run_returns_phase_completed_message(self):
         state = _make_state()
-        state._file_diffs = []
+        state.file_diffs = []
 
         plan_json = json.dumps(
             {
@@ -1103,7 +1103,7 @@ class TestPlannerAgent:
 
     def test_generate_plan_falls_back_on_llm_error(self):
         state = _make_state()
-        state._file_diffs = [_make_file_diff("src/utils.py", RiskLevel.AUTO_SAFE)]
+        state.file_diffs = [_make_file_diff("src/utils.py", RiskLevel.AUTO_SAFE)]
 
         import asyncio
 
@@ -1118,7 +1118,7 @@ class TestPlannerAgent:
 
     def test_generate_plan_handles_json_in_code_block(self):
         state = _make_state()
-        state._file_diffs = []
+        state.file_diffs = []
 
         inner = json.dumps(
             {
@@ -1295,10 +1295,11 @@ class TestPlannerAgent:
             "_call_llm_with_retry",
             new=AsyncMock(side_effect=RuntimeError("LLM error")),
         ):
-            revised = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.get_event_loop().run_until_complete(
                 self.agent.revise_plan(state, [issue])
             )
 
+        revised, responses, diff_entries = result
         assert revised is not None
         human_required_paths = [
             fp
@@ -1431,7 +1432,7 @@ class TestJudgeAgent:
     def test_run_reviews_high_risk_files(self):
         state = _make_state()
         fd = _make_file_diff("src/auth.py", RiskLevel.HUMAN_REQUIRED)
-        state._file_diffs = [fd]
+        state.file_diffs = [fd]
 
         record = self._make_decision_record("src/auth.py")
         state.file_decision_records["src/auth.py"] = record
@@ -1472,7 +1473,7 @@ class TestJudgeAgent:
         state = _make_state()
         fd = _make_file_diff("src/utils.py", RiskLevel.AUTO_SAFE)
         fd = fd.model_copy(update={"is_security_sensitive": True})
-        state._file_diffs = [fd]
+        state.file_diffs = [fd]
 
         record = self._make_decision_record("src/utils.py")
         state.file_decision_records["src/utils.py"] = record
@@ -1672,7 +1673,7 @@ class TestJudgeAgent:
     def test_run_reads_file_from_git_tool(self):
         state = _make_state()
         fd = _make_file_diff("src/auth.py", RiskLevel.HUMAN_REQUIRED)
-        state._file_diffs = [fd]
+        state.file_diffs = [fd]
 
         record = self._make_decision_record("src/auth.py")
         state.file_decision_records["src/auth.py"] = record

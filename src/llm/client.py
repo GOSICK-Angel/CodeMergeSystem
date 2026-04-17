@@ -174,7 +174,13 @@ class OpenAIClient(LLMClient):
             messages=all_messages,
             **kwargs,
         )
-        return response.choices[0].message.content or ""
+        content: str | None = response.choices[0].message.content
+        if not content:
+            finish_reason = response.choices[0].finish_reason
+            raise RuntimeError(
+                f"OpenAI returned empty content (finish_reason={finish_reason!r}, model={self.model!r})"
+            )
+        return content
 
     async def complete_structured(
         self,

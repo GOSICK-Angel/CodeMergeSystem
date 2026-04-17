@@ -13,9 +13,19 @@ mypy src                         # type check (strict mode)
 ruff check src/                  # lint
 ruff format src/                 # format
 merge --help                     # CLI entry point
-merge validate --config <path>   # validate config + env vars
-merge run --config <path>        # run full merge
+
+# One-stop flow (recommended)
+merge <target-branch>            # interactive TUI — auto-setup on first run
+merge <target-branch> --no-tui  # plain text output
+merge <target-branch> --ci      # CI mode (no interaction, JSON summary to stdout)
+merge <target-branch> --dry-run # analysis only, no merge
+merge <target-branch> -r        # force reconfiguration wizard
+
+# Legacy subcommands (still fully supported)
+merge run --config <path>        # explicit config file
 merge resume --run-id <id>       # resume from checkpoint
+merge validate --config <path>   # validate config + env vars
+merge init                       # deprecated: use `merge <target-branch>` instead
 ```
 
 ## Required Environment Variables
@@ -40,13 +50,31 @@ These are load-bearing design rules enforced by unit tests — do not violate th
 - **Plan dispute does not modify `risk_level`** — `raise_plan_dispute()` only appends to `state.plan_disputes`
 - **HumanInterface never fills defaults** — skipped items keep `ESCALATE_HUMAN` status until the user explicitly decides
 - **Plan revision limit** — when `plan_revision_rounds >= max_plan_revision_rounds`, transition to `AWAITING_HUMAN`, not `FAILED`
-- **Plan human review is mandatory** — after PlannerJudge approves the plan, the system transitions to `AWAITING_HUMAN` (not directly to `AUTO_MERGING`). The human must set `state.plan_human_review` with a `PlanHumanDecision` (approve/reject/modify) before the system proceeds. A `plan_review_<run_id>.md` report is generated in `output.directory`, documenting all planner-judge interaction rounds and the human review record.
+- **Plan human review** — after PlannerJudge approves the plan, the system checks `pending_user_decisions`. If any files are `HUMAN_REQUIRED`, it transitions to `AWAITING_HUMAN` for human sign-off. If no files need human decisions (all files are auto-mergeable), the system skips `AWAITING_HUMAN` and transitions directly to `AUTO_MERGING`. For non-converged plans (MAX_ROUNDS / STALLED / LLM_FAILURE), `AWAITING_HUMAN` is always required. A `plan_review_<run_id>.md` report is generated regardless.
 
 ## Configuration
 
 Config is YAML-driven. Each agent has its own `AgentLLMConfig` (provider, model, `api_key_env`). The `agents` block in `MergeConfig` is the authoritative per-agent config; the top-level `llm` block is a legacy global default.
 
 Key config thresholds: `risk_score_low=0.3`, `risk_score_high=0.6`, `auto_merge_confidence=0.85`. Files matching `security_sensitive.patterns` are forced to `HUMAN_REQUIRED`.
+
+### `.merge/` Directory (production mode)
+
+When run inside a target project (pip-installed), all artifacts are written under `<repo>/.merge/`:
+
+```
+<repo>/.merge/
+  config.yaml          # auto-generated on first run by `merge <branch>`
+  .env                 # API keys (gitignored automatically)
+  .gitignore           # auto-generated: ignores .env and runs/
+  plans/               # MERGE_PLAN_*.md reports (replaces MERGE_RECORD/)
+  runs/<run_id>/
+    checkpoint.json    # single rolling checkpoint
+    merge_report.md
+    plan_review.md
+```
+
+API key resolution order: shell env vars → `.merge/.env` → `~/.config/code-merge-system/.env`
 
 ## Code Style
 

@@ -55,29 +55,32 @@ def _handle_ci_exit(final_state: MergeState, export_decisions: str | None) -> No
 
 
 def run_command_impl(
-    config_path: str,
+    config_path_or_config: str | MergeConfig,
     dry_run: bool,
     export_decisions: str | None = None,
     ci: bool = False,
     github_pr: int | None = None,
 ) -> None:
-    config_file = Path(config_path)
-    if not config_file.exists():
-        if ci:
-            print('{"status": "error", "message": "Config file not found"}')
+    if isinstance(config_path_or_config, MergeConfig):
+        config = config_path_or_config
+    else:
+        config_file = Path(config_path_or_config)
+        if not config_file.exists():
+            if ci:
+                print('{"status": "error", "message": "Config file not found"}')
+                sys.exit(EXIT_CONFIG_ERROR)
+            console.print(f"[red]Config file not found: {config_path_or_config}[/red]")
             sys.exit(EXIT_CONFIG_ERROR)
-        console.print(f"[red]Config file not found: {config_path}[/red]")
-        sys.exit(EXIT_CONFIG_ERROR)
 
-    try:
-        raw_config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-        config = MergeConfig.model_validate(raw_config)
-    except Exception as e:
-        if ci:
-            print(f'{{"status": "error", "message": "Invalid config: {e}"}}')
+        try:
+            raw_config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+            config = MergeConfig.model_validate(raw_config)
+        except Exception as e:
+            if ci:
+                print(f'{{"status": "error", "message": "Invalid config: {e}"}}')
+                sys.exit(EXIT_CONFIG_ERROR)
+            console.print(f"[red]Invalid config: {e}[/red]")
             sys.exit(EXIT_CONFIG_ERROR)
-        console.print(f"[red]Invalid config: {e}[/red]")
-        sys.exit(EXIT_CONFIG_ERROR)
 
     if dry_run and not ci:
         console.print("[yellow]Dry run mode: will analyze but not merge[/yellow]")
@@ -89,6 +92,14 @@ def run_command_impl(
         console.print(f"  Fork: {config.fork_ref}")
 
     orchestrator = Orchestrator(config)
+
+    if not ci:
+
+        def _print_activity(agent: str, action: str) -> None:
+            color = {"planner": "cyan", "planner_judge": "magenta"}.get(agent, "dim")
+            console.print(f"  [{color}][{agent}][/{color}] {action}")
+
+        orchestrator.set_activity_callback(_print_activity)
 
     async def execute() -> MergeState:
         return await orchestrator.run(state)
@@ -113,8 +124,67 @@ def run_command_impl(
         console.print("[yellow]Paused: awaiting human decisions[/yellow]")
         console.print(f"  Run ID: {final_state.run_id}")
 
+        if final_state.plan_review_log:
+            console.print("")
+            console.print("[bold]Plan Review Negotiation Summary:[/bold]")
+            for rnd in final_state.plan_review_log:
+                result_val = (
+                    rnd.verdict_result.value
+                    if hasattr(rnd.verdict_result, "value")
+                    else str(rnd.verdict_result)
+                )
+                console.print(
+                    f"  Round {rnd.round_number}: "
+                    f"[magenta]{result_val}[/magenta] "
+                    f"({rnd.issues_count} issues)"
+                )
+                if rnd.planner_responses:
+                    accepted = sum(
+                        1 for r in rnd.planner_responses if r.action.value == "accept"
+                    )
+                    rejected = sum(
+                        1 for r in rnd.planner_responses if r.action.value == "reject"
+                    )
+                    discussed = sum(
+                        1 for r in rnd.planner_responses if r.action.value == "discuss"
+                    )
+                    console.print(
+                        f"    Planner: [green]{accepted} accept[/green], "
+                        f"[red]{rejected} reject[/red], "
+                        f"[yellow]{discussed} discuss[/yellow]"
+                    )
+                    for r in rnd.planner_responses:
+                        if r.action.value == "reject":
+                            console.print(
+                                f"    [red]REJECT[/red] `{r.file_path}`: {r.reason}"
+                            )
+                        elif r.action.value == "discuss":
+                            console.print(
+                                f"    [yellow]DISCUSS[/yellow] `{r.file_path}`: "
+                                f"{r.reason}"
+                            )
+                if rnd.plan_diff:
+                    console.print("    Plan diff:")
+                    for d in rnd.plan_diff:
+                        console.print(
+                            f"      `{d.file_path}`: {d.old_risk} → {d.new_risk}"
+                        )
+
+        if final_state.pending_user_decisions:
+            console.print("")
+            console.print(
+                f"[bold yellow]{len(final_state.pending_user_decisions)} "
+                f"files require your decision:[/bold yellow]"
+            )
+            for item in final_state.pending_user_decisions:
+                console.print(
+                    f"  - `{item.file_path}` "
+                    f"[{item.current_classification}]: {item.description}"
+                )
+
         plan_review_file = Path(output_dir) / f"plan_review_{final_state.run_id}.md"
         if plan_review_file.exists():
+            console.print("")
             console.print(f"  [green]Plan review report: {plan_review_file}[/green]")
             console.print("  Please review the plan before approving.")
 

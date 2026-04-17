@@ -1,0 +1,340 @@
+"""Interactive setup wizard for the one-stop `merge <branch>` flow.
+
+Entry point: detect_or_setup(target_branch, repo_path, reconfigure) -> MergeConfig
+
+First run:  guides the user through API keys + thresholds, writes
+            <repo>/.merge/config.yaml and <repo>/.merge/.env.
+Repeat run: loads existing config, shows a one-line summary, and asks
+            for confirmation (or 'c' to reconfigure).
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import yaml
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
+
+from src.cli.env import read_env_file, write_env_file
+from src.cli.paths import (
+    ensure_merge_dir,
+    get_config_path,
+    get_global_env_path,
+    get_project_merge_dir,
+)
+from src.models.config import MergeConfig
+
+console = Console()
+
+_ENV_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "GITHUB_TOKEN",
+)
+
+
+def detect_or_setup(
+    target_branch: str,
+    repo_path: str = ".",
+    reconfigure: bool = False,
+) -> MergeConfig:
+    """Load existing config or run interactive wizard.
+
+    Returns a validated MergeConfig with upstream_ref = target_branch.
+    On first run, also migrates any existing MERGE_RECORD/ directory.
+    """
+    config_path = get_config_path(repo_path)
+
+    if not reconfigure and config_path.exists():
+        return _repeat_run_flow(target_branch, repo_path, config_path)
+
+    migrate_merge_record(repo_path)
+    return _interactive_setup(target_branch, repo_path)
+
+
+def _auto_detect_fork_ref(repo_path: str) -> str:
+    """Return the current git branch name, falling back to 'origin/main'."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        branch = result.stdout.strip()
+        if branch and branch != "HEAD":
+            return branch
+    except Exception:
+        pass
+    return "origin/main"
+
+
+def _resolve_api_keys(repo_path: str) -> dict[str, str]:
+    """Merge API keys from all sources (lowest to highest priority):
+
+    1. ~/.config/code-merge-system/.env   (global fallback)
+    2. <repo>/.merge/.env                 (project-level)
+    3. Shell environment variables        (highest priority)
+    """
+    resolved: dict[str, str] = {}
+
+    global_env = get_global_env_path()
+    if global_env.exists():
+        resolved.update(read_env_file(global_env))
+
+    project_env = get_project_merge_dir(repo_path) / ".env"
+    if project_env.exists():
+        resolved.update(read_env_file(project_env))
+
+    for key in _ENV_KEYS:
+        val = os.environ.get(key)
+        if val:
+            resolved[key] = val
+
+    return resolved
+
+
+def _repeat_run_flow(
+    target_branch: str,
+    repo_path: str,
+    config_path: Path,
+) -> MergeConfig:
+    """Show config summary and confirm before starting."""
+    try:
+        raw: dict[str, Any] = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        raw["upstream_ref"] = target_branch
+        config = MergeConfig.model_validate(raw)
+    except Exception as e:
+        console.print(f"[yellow]Config load error: {e}. Re-running setup.[/yellow]")
+        return _interactive_setup(target_branch, repo_path)
+
+    console.print(
+        Panel(
+            f"[bold]Code Merge System[/bold]\n\n"
+            f"  Target:  [cyan]{target_branch}[/cyan] → [cyan]{config.fork_ref}[/cyan]\n"
+            f"  Repo:    {Path(repo_path).resolve()}\n"
+            f"  Config:  {config_path}",
+            title="merge",
+            border_style="cyan",
+        )
+    )
+    console.print("\nPress Enter to start, or [bold]c[/bold] to reconfigure...")
+    choice = Prompt.ask("", default="", show_default=False)
+    if choice.lower() == "c":
+        return _interactive_setup(target_branch, repo_path)
+
+    return config
+
+
+def _interactive_setup(target_branch: str, repo_path: str) -> MergeConfig:
+    """Full interactive first-time wizard."""
+    resolved_keys = _resolve_api_keys(repo_path)
+    fork_ref = _auto_detect_fork_ref(repo_path)
+
+    console.print(
+        Panel(
+            f"[bold cyan]Code Merge System[/bold cyan]\n\n"
+            f"  Target: [cyan]{target_branch}[/cyan] → [cyan]{fork_ref}[/cyan]\n"
+            f"  Repo:   {Path(repo_path).resolve()}",
+            title="[1/3] Configuration",
+            border_style="cyan",
+        )
+    )
+
+    project_context = Prompt.ask(
+        "\nProject description (helps AI understand context)",
+        default="",
+    )
+
+    console.print("\n[bold yellow]API Keys[/bold yellow]")
+    collected_keys: dict[str, str] = {}
+
+    for name, required in [
+        ("ANTHROPIC_API_KEY", True),
+        ("OPENAI_API_KEY", True),
+        ("GITHUB_TOKEN", False),
+    ]:
+        val = _prompt_api_key(name, resolved_keys.get(name, ""), required=required)
+        if val:
+            collected_keys[name] = val
+
+    console.print("\n[bold yellow]Thresholds[/bold yellow]")
+    use_defaults = Confirm.ask(
+        "Use defaults? (auto_merge=0.85, risk_low=0.3, risk_high=0.6)",
+        default=True,
+    )
+    if use_defaults:
+        auto_merge, risk_low, risk_high = 0.85, 0.30, 0.60
+    else:
+        auto_merge = _prompt_float("auto_merge_confidence", 0.85)
+        risk_low = _prompt_float("risk_score_low", 0.30)
+        risk_high = _prompt_float("risk_score_high", 0.60)
+
+    ensure_merge_dir(repo_path)
+
+    if collected_keys:
+        env_path = get_project_merge_dir(repo_path) / ".env"
+        write_env_file(env_path, collected_keys)
+        console.print(f"\n  [green]API keys saved to:[/green] {env_path}")
+        for k, v in collected_keys.items():
+            os.environ.setdefault(k, v)
+
+    config_data: dict[str, Any] = {
+        "upstream_ref": target_branch,
+        "fork_ref": fork_ref,
+        "working_branch": "merge/auto-{timestamp}",
+        "repo_path": repo_path,
+        "project_context": project_context,
+        "max_files_per_run": 500,
+        "max_plan_revision_rounds": 2,
+        "agents": {
+            "planner": {
+                "provider": "anthropic",
+                "model": "claude-opus-4-6",
+                "api_key_env": "ANTHROPIC_API_KEY",
+            },
+            "planner_judge": {
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key_env": "OPENAI_API_KEY",
+            },
+            "conflict_analyst": {
+                "provider": "anthropic",
+                "model": "claude-sonnet-4-6",
+                "api_key_env": "ANTHROPIC_API_KEY",
+            },
+            "executor": {
+                "provider": "openai",
+                "model": "gpt-4o",
+                "temperature": 0.1,
+                "api_key_env": "OPENAI_API_KEY",
+            },
+            "judge": {
+                "provider": "anthropic",
+                "model": "claude-opus-4-6",
+                "temperature": 0.1,
+                "api_key_env": "ANTHROPIC_API_KEY",
+            },
+            "human_interface": {
+                "provider": "anthropic",
+                "model": "claude-haiku-4-5-20251001",
+                "api_key_env": "ANTHROPIC_API_KEY",
+            },
+        },
+        "thresholds": {
+            "auto_merge_confidence": auto_merge,
+            "human_escalation": 0.60,
+            "risk_score_low": risk_low,
+            "risk_score_high": risk_high,
+        },
+        "output": {
+            "directory": "./outputs",
+            "formats": ["json", "markdown"],
+        },
+    }
+
+    if "GITHUB_TOKEN" in collected_keys:
+        config_data["github"] = {"enabled": True, "token_env": "GITHUB_TOKEN"}
+
+    config_path = get_config_path(repo_path)
+    config_path.write_text(
+        yaml.dump(config_data, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(f"  [green]Config saved to:[/green] {config_path}")
+
+    merge_config = MergeConfig.model_validate(config_data)
+
+    console.print(
+        Panel(
+            f"  API keys ........ [green]OK[/green]\n"
+            f"  Repository ...... {Path(repo_path).resolve()}",
+            title="[2/3] Validation",
+            border_style="green",
+        )
+    )
+    console.print(
+        Panel(
+            f"  [cyan]{target_branch}[/cyan] → [cyan]{fork_ref}[/cyan]\n\n"
+            "  Press Enter to start, or Ctrl+C to cancel...",
+            title="[3/3] Ready to merge",
+            border_style="green",
+        )
+    )
+    Prompt.ask("", default="", show_default=False)
+
+    return merge_config
+
+
+def _prompt_api_key(name: str, existing: str, required: bool) -> str:
+    source_hint = " (from env)" if os.environ.get(name) else ""
+    masked = _mask_key(existing) if existing else ""
+    hint = f" {masked}{source_hint}" if masked else ""
+    label = f"  {name}:{hint}"
+    if not required:
+        label += " [optional, Enter to skip]"
+
+    value = Prompt.ask(label, default="", show_default=False)
+    if not value and existing:
+        return existing
+    if not value and required and not existing:
+        console.print(
+            f"    [yellow]Warning: {name} not set — some agents will fail.[/yellow]"
+        )
+    return value
+
+
+def _mask_key(key: str) -> str:
+    if len(key) <= 8:
+        return "****"
+    return key[:4] + "****" + key[-4:]
+
+
+def _prompt_float(label: str, default: float) -> float:
+    while True:
+        raw = Prompt.ask(f"  {label}", default=str(default))
+        try:
+            val = float(raw)
+            if 0.0 <= val <= 1.0:
+                return val
+            console.print("    [red]Must be between 0.0 and 1.0[/red]")
+        except ValueError:
+            console.print("    [red]Please enter a valid number[/red]")
+
+
+def migrate_merge_record(repo_path: str = ".") -> None:
+    """Move MERGE_RECORD/*.md into .merge/plans/ (one-time migration).
+
+    Safe to call repeatedly — skips files that already exist in the
+    destination and leaves the source directory untouched afterwards.
+    """
+    import shutil
+
+    src_dir = Path(repo_path).resolve() / "MERGE_RECORD"
+    if not src_dir.is_dir():
+        return
+
+    plans_dir = get_project_merge_dir(repo_path) / "plans"
+    plans_dir.mkdir(parents=True, exist_ok=True)
+
+    moved: list[str] = []
+    for md_file in src_dir.glob("*.md"):
+        dest = plans_dir / md_file.name
+        if dest.exists():
+            continue
+        shutil.move(str(md_file), str(dest))
+        moved.append(md_file.name)
+
+    if moved:
+        console.print(
+            f"  [green]Migrated {len(moved)} plan file(s)[/green] "
+            f"from MERGE_RECORD/ → .merge/plans/"
+        )

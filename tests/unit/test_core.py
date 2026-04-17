@@ -114,8 +114,25 @@ def _make_agent_message(
 
 
 def _make_plan_judge_verdict(result: PlanJudgeResult) -> PlanJudgeVerdict:
+    from src.models.plan_judge import PlanIssue
+    from src.models.diff import RiskLevel
+
+    issues = (
+        [
+            PlanIssue(
+                file_path="a.py",
+                current_classification=RiskLevel.AUTO_SAFE,
+                suggested_classification=RiskLevel.AUTO_RISKY,
+                reason="test issue",
+                issue_type="risk_underestimated",
+            )
+        ]
+        if result == PlanJudgeResult.REVISION_NEEDED
+        else []
+    )
     return PlanJudgeVerdict(
         result=result,
+        issues=issues,
         summary="test verdict",
         judge_model="gpt-4o",
         timestamp=datetime.now(),
@@ -284,43 +301,65 @@ class TestStateMachine:
 
 
 class TestCheckpoint:
-    def test_save_creates_file(self, tmp_path):
-        cp = Checkpoint(str(tmp_path))
+    def test_save_creates_checkpoint_json(self, tmp_path):
+        cp = Checkpoint(tmp_path)
         state = _make_state(_make_config(str(tmp_path)))
         path = cp.save(state, "test_tag")
         assert path.exists()
-        assert f"run_{state.run_id}_test_tag.json" == path.name
+        assert path.name == "checkpoint.json"
 
     def test_save_writes_valid_json(self, tmp_path):
-        cp = Checkpoint(str(tmp_path))
+        cp = Checkpoint(tmp_path)
         state = _make_state(_make_config(str(tmp_path)))
         path = cp.save(state, "json_check")
         data = json.loads(path.read_text())
         assert data["run_id"] == state.run_id
 
     def test_save_updates_checkpoint_path_on_state(self, tmp_path):
-        cp = Checkpoint(str(tmp_path))
+        cp = Checkpoint(tmp_path)
         state = _make_state(_make_config(str(tmp_path)))
         path = cp.save(state, "path_update")
         assert state.checkpoint_path == str(path)
 
-    def test_save_creates_latest_link(self, tmp_path):
-        cp = Checkpoint(str(tmp_path))
-        state = _make_state(_make_config(str(tmp_path)))
-        cp.save(state, "first")
-        latest = cp.checkpoint_dir / f"run_{state.run_id}_latest.json"
-        assert latest.exists()
-
-    def test_save_multiple_tags_updates_latest(self, tmp_path):
-        cp = Checkpoint(str(tmp_path))
+    def test_save_single_file_overwrites_previous(self, tmp_path):
+        cp = Checkpoint(tmp_path)
         state = _make_state(_make_config(str(tmp_path)))
         cp.save(state, "first")
         cp.save(state, "second")
-        latest = cp.checkpoint_dir / f"run_{state.run_id}_latest.json"
-        assert latest.exists()
+        files = [p for p in tmp_path.iterdir() if p.suffix == ".json"]
+        assert len(files) == 1
+        assert files[0].name == "checkpoint.json"
+
+    def test_save_no_symlinks_created(self, tmp_path):
+        cp = Checkpoint(tmp_path)
+        state = _make_state(_make_config(str(tmp_path)))
+        cp.save(state, "any_tag")
+        for p in tmp_path.rglob("*"):
+            assert not p.is_symlink()
+
+    def test_debug_mode_saves_tagged_copy(self, tmp_path):
+        cp = Checkpoint(tmp_path, debug_checkpoints=True)
+        state = _make_state(_make_config(str(tmp_path)))
+        cp.save(state, "after_init")
+        debug_dir = tmp_path / "checkpoints_debug"
+        assert debug_dir.exists()
+        assert (debug_dir / "after_init.json").exists()
+
+    def test_debug_mode_empty_tag_no_copy(self, tmp_path):
+        cp = Checkpoint(tmp_path, debug_checkpoints=True)
+        state = _make_state(_make_config(str(tmp_path)))
+        cp.save(state)
+        debug_dir = tmp_path / "checkpoints_debug"
+        assert not any(debug_dir.iterdir())
+
+    def test_non_debug_mode_no_tagged_copy(self, tmp_path):
+        cp = Checkpoint(tmp_path, debug_checkpoints=False)
+        state = _make_state(_make_config(str(tmp_path)))
+        cp.save(state, "some_tag")
+        assert not (tmp_path / "checkpoints_debug").exists()
 
     def test_load_restores_state(self, tmp_path):
-        cp = Checkpoint(str(tmp_path))
+        cp = Checkpoint(tmp_path)
         state = _make_state(_make_config(str(tmp_path)))
         state.status = SystemStatus.PLANNING
         path = cp.save(state, "load_test")
@@ -328,56 +367,45 @@ class TestCheckpoint:
         assert restored.run_id == state.run_id
         assert restored.status == SystemStatus.PLANNING
 
+    def test_load_default_uses_checkpoint_json(self, tmp_path):
+        cp = Checkpoint(tmp_path)
+        state = _make_state(_make_config(str(tmp_path)))
+        state.status = SystemStatus.AUTO_MERGING
+        cp.save(state)
+        restored = cp.load()
+        assert restored.run_id == state.run_id
+        assert restored.status == SystemStatus.AUTO_MERGING
+
     def test_load_nonexistent_raises_file_not_found(self, tmp_path):
-        cp = Checkpoint(str(tmp_path))
+        cp = Checkpoint(tmp_path)
         with pytest.raises(FileNotFoundError):
             cp.load(tmp_path / "does_not_exist.json")
 
-    def test_list_checkpoints_returns_sorted_paths(self, tmp_path):
-        cp = Checkpoint(str(tmp_path))
-        state = _make_state(_make_config(str(tmp_path)))
-        cp.save(state, "alpha")
-        cp.save(state, "beta")
-        paths = cp.list_checkpoints(state.run_id)
-        assert len(paths) == 2
-        names = [p.name for p in paths]
-        assert any("alpha" in n for n in names)
-        assert any("beta" in n for n in names)
+    def test_load_default_nonexistent_raises_file_not_found(self, tmp_path):
+        cp = Checkpoint(tmp_path)
+        with pytest.raises(FileNotFoundError):
+            cp.load()
 
-    def test_list_checkpoints_excludes_latest_link(self, tmp_path):
-        cp = Checkpoint(str(tmp_path))
-        state = _make_state(_make_config(str(tmp_path)))
-        cp.save(state, "one")
-        paths = cp.list_checkpoints(state.run_id)
-        for p in paths:
-            assert "_latest" not in p.name
-
-    def test_list_checkpoints_empty_for_unknown_run_id(self, tmp_path):
-        cp = Checkpoint(str(tmp_path))
-        paths = cp.list_checkpoints("nonexistent-run-id")
-        assert paths == []
-
-    def test_get_latest_returns_most_recent(self, tmp_path):
-        cp = Checkpoint(str(tmp_path))
+    def test_get_latest_returns_checkpoint_path(self, tmp_path):
+        cp = Checkpoint(tmp_path)
         state = _make_state(_make_config(str(tmp_path)))
         cp.save(state, "first")
-        cp.save(state, "second")
-        result = cp.get_latest(state.run_id)
+        result = cp.get_latest()
         assert result is not None
         assert result.exists()
+        assert result.name == "checkpoint.json"
 
-    def test_get_latest_returns_none_for_unknown_run(self, tmp_path):
-        cp = Checkpoint(str(tmp_path))
-        result = cp.get_latest("no-such-run")
-        assert result is None
+    def test_get_latest_returns_none_when_empty(self, tmp_path):
+        cp = Checkpoint(tmp_path)
+        assert cp.get_latest() is None
 
-    def test_checkpoint_dir_created_on_init(self, tmp_path):
+    def test_run_dir_created_on_init(self, tmp_path):
         subdir = tmp_path / "deep" / "nested"
-        cp = Checkpoint(str(subdir))
-        assert cp.checkpoint_dir.exists()
+        cp = Checkpoint(subdir)
+        assert cp.run_dir.exists()
 
     def test_register_signal_handler_does_not_raise(self, tmp_path):
-        cp = Checkpoint(str(tmp_path))
+        cp = Checkpoint(tmp_path)
         state = _make_state(_make_config(str(tmp_path)))
         cp.register_signal_handler(state)
 
@@ -947,7 +975,7 @@ class TestPhaseClasses:
             await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.PLANNING
-        assert len(getattr(state, "_file_diffs", [])) == 1
+        assert len(state.file_diffs) == 1
         assert state.file_categories == {"src/foo.py": FileChangeCategory.C}
 
     async def test_planning_transitions_to_plan_reviewing(self, tmp_path):
@@ -981,7 +1009,8 @@ class TestPhaseClasses:
 
         assert state.phase_results[MergePhase.ANALYSIS.value].status == "failed"
 
-    async def test_plan_review_approved_transitions_to_awaiting_human(self, tmp_path):
+    async def test_plan_review_approved_no_human_files_skips_await(self, tmp_path):
+        """Approved plan with no HUMAN_REQUIRED files should skip to AUTO_MERGING."""
         from src.core.phases.plan_review import PlanReviewPhase
 
         config = _make_config(str(tmp_path))
@@ -995,13 +1024,46 @@ class TestPhaseClasses:
 
         state = _make_state(config)
         state.status = SystemStatus.PLAN_REVIEWING
-        state.merge_plan = _make_merge_plan()
+        state.merge_plan = _make_merge_plan()  # only auto_safe files
+        phase = PlanReviewPhase()
+        await phase.execute(state, ctx)
+
+        assert state.status == SystemStatus.AUTO_MERGING
+        assert len(state.plan_review_log) == 1
+        assert state.plan_review_log[0].verdict_result == PlanJudgeResult.APPROVED
+
+    async def test_plan_review_approved_with_human_files_awaits(self, tmp_path):
+        """Approved plan with HUMAN_REQUIRED files should go to AWAITING_HUMAN."""
+        from src.core.phases.plan_review import PlanReviewPhase
+        from src.models.plan import PhaseFileBatch, MergePhase as MP
+        from src.models.diff import RiskLevel
+
+        config = _make_config(str(tmp_path))
+        mock_pj = MagicMock()
+        mock_pj.review_plan = AsyncMock(
+            return_value=_make_plan_judge_verdict(PlanJudgeResult.APPROVED)
+        )
+        ctx = self._make_ctx(
+            config, agents={"planner": MagicMock(), "planner_judge": mock_pj}
+        )
+
+        state = _make_state(config)
+        state.status = SystemStatus.PLAN_REVIEWING
+        plan = _make_merge_plan()
+        plan.phases.append(
+            PhaseFileBatch(
+                batch_id="b_human",
+                phase=MP.CONFLICT_ANALYSIS,
+                file_paths=["secret.yaml"],
+                risk_level=RiskLevel.HUMAN_REQUIRED,
+            )
+        )
+        state.merge_plan = plan
         phase = PlanReviewPhase()
         await phase.execute(state, ctx)
 
         assert state.status == SystemStatus.AWAITING_HUMAN
         assert len(state.plan_review_log) == 1
-        assert state.plan_review_log[0].verdict_result == PlanJudgeResult.APPROVED
 
     async def test_plan_review_exceeds_max_rounds_proceeds(self, tmp_path):
         from src.core.phases.plan_review import PlanReviewPhase
@@ -1018,7 +1080,7 @@ class TestPhaseClasses:
             return_value=_make_plan_judge_verdict(PlanJudgeResult.REVISION_NEEDED)
         )
         mock_planner = MagicMock()
-        mock_planner.revise_plan = AsyncMock(return_value=_make_merge_plan())
+        mock_planner.revise_plan = AsyncMock(return_value=(_make_merge_plan(), [], []))
         ctx = self._make_ctx(
             config, agents={"planner": mock_planner, "planner_judge": mock_pj}
         )
@@ -1044,7 +1106,7 @@ class TestPhaseClasses:
         state = _make_state(config)
         state.status = SystemStatus.AUTO_MERGING
         state.merge_plan = _make_merge_plan(auto_safe_files=["src/foo.py"])
-        object.__setattr__(state, "_file_diffs", [_make_file_diff("src/foo.py")])
+        state.file_diffs = [_make_file_diff("src/foo.py")]
         phase = AutoMergePhase()
         await phase.execute(state, ctx)
 
@@ -1080,7 +1142,7 @@ class TestPhaseClasses:
         state = _make_state(config)
         state.status = SystemStatus.ANALYZING_CONFLICTS
         fd = _make_file_diff("src/foo.py")
-        object.__setattr__(state, "_file_diffs", [fd])
+        state.file_diffs = [fd]
         state.conflict_analyses["src/foo.py"] = _make_conflict_analysis(
             confidence=0.95, can_coexist=True
         )
@@ -1105,7 +1167,7 @@ class TestPhaseClasses:
         state = _make_state(config)
         state.status = SystemStatus.ANALYZING_CONFLICTS
         fd = _make_file_diff("src/foo.py")
-        object.__setattr__(state, "_file_diffs", [fd])
+        state.file_diffs = [fd]
         state.conflict_analyses["src/foo.py"] = _make_conflict_analysis(
             confidence=0.1,
         )
@@ -1359,7 +1421,7 @@ class TestPhaseClasses:
             auto_safe_files=["src/safe.py"],
             risky_files=["src/risky.py"],
         )
-        object.__setattr__(state, "_file_diffs", [_make_file_diff("src/safe.py")])
+        state.file_diffs = [_make_file_diff("src/safe.py")]
         phase = AutoMergePhase()
         await phase.execute(state, ctx)
 

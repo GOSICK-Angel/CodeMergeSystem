@@ -43,9 +43,8 @@ class JudgeAgent(BaseAgent):
         reviewed_files: list[str] = []
 
         file_diffs_map: dict[str, FileDiff] = {}
-        if hasattr(state, "_file_diffs"):
-            for fd in state._file_diffs or []:
-                file_diffs_map[fd.file_path] = fd
+        for fd in state.file_diffs:
+            file_diffs_map[fd.file_path] = fd
 
         deterministic_issues = self._run_deterministic_pipeline(state, file_diffs_map)
         all_issues.extend(deterministic_issues)

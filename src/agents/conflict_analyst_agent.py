@@ -42,9 +42,8 @@ class ConflictAnalystAgent(BaseAgent):
                 high_risk_files.extend(batch.file_paths)
 
         file_diffs_map: dict[str, FileDiff] = {}
-        if hasattr(state, "_file_diffs"):
-            for fd in state._file_diffs or []:
-                file_diffs_map[fd.file_path] = fd
+        for fd in state.file_diffs:
+            file_diffs_map[fd.file_path] = fd
 
         for file_path in high_risk_files:
             fd = file_diffs_map.get(file_path)

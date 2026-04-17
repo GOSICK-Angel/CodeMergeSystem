@@ -99,6 +99,13 @@ _I18N: dict[str, dict[str, str]] = {
         "calls": "Calls",
         "tokens": "Tokens",
         "cost": "Cost (USD)",
+        "planner_response_hdr": "Planner Responses",
+        "response_accept": "Accept",
+        "response_reject": "Reject",
+        "response_discuss": "Discuss",
+        "plan_diff_hdr": "Plan Diff",
+        "negotiation_hdr": "Negotiation Log",
+        "counter_proposal": "Counter-proposal",
     },
     "zh": {
         "merge_report": "合并报告",
@@ -191,6 +198,13 @@ _I18N: dict[str, dict[str, str]] = {
         "calls": "调用次数",
         "tokens": "Token 数",
         "cost": "成本 (USD)",
+        "planner_response_hdr": "Planner 逐条回应",
+        "response_accept": "接受",
+        "response_reject": "拒绝",
+        "response_discuss": "讨论",
+        "plan_diff_hdr": "计划变更 Diff",
+        "negotiation_hdr": "协商记录",
+        "counter_proposal": "替代方案",
     },
 }
 
@@ -269,6 +283,21 @@ def write_markdown_report(
         f"**{t('updated')}**: {state.updated_at.isoformat()}",
         "",
     ]
+
+    mi = getattr(state, "migration_info", None)
+    if mi is not None and getattr(mi, "detected", False) is True:
+        mig_title = "迁移检测" if lang == "zh" else "Migration Detection"
+        lines += [
+            f"## {mig_title}",
+            f"- {t('confidence')}: {mi.confidence:.0%}",
+            f"- {'同步文件' if lang == 'zh' else 'Synced files'}: "
+            f"{mi.synced_file_count}/{mi.upstream_changed_file_count} ({mi.sync_ratio:.0%})",
+            f"- {'有效合并基准' if lang == 'zh' else 'Effective merge-base'}: "
+            f"`{mi.effective_merge_base[:12]}`",
+            f"- {'跳过提交' if lang == 'zh' else 'Skipped commits'}: "
+            f"{mi.skipped_commit_count}",
+            "",
+        ]
 
     if state.merge_plan:
         plan = state.merge_plan
@@ -481,6 +510,36 @@ def write_plan_review_report(state: MergeState, output_dir: str) -> Path:
                         f"{issue.get('reason', '')} "
                         f"({issue.get('current', '?')} → {issue.get('suggested', '?')})"
                     )
+
+            if rnd.planner_responses:
+                action_label = {
+                    "accept": t("response_accept"),
+                    "reject": t("response_reject"),
+                    "discuss": t("response_discuss"),
+                }
+                lines.append(f"- **{t('planner_response_hdr')}**:")
+                for pr in rnd.planner_responses:
+                    action_val = (
+                        pr.action.value
+                        if hasattr(pr.action, "value")
+                        else str(pr.action)
+                    )
+                    label = action_label.get(action_val, action_val)
+                    line = f"  - `{pr.file_path}` **[{label}]**: {pr.reason}"
+                    if pr.counter_proposal:
+                        line += f" | {t('counter_proposal')}: {pr.counter_proposal}"
+                    lines.append(line)
+
+            if rnd.plan_diff:
+                lines.append(f"- **{t('plan_diff_hdr')}**:")
+                for d in rnd.plan_diff:
+                    lines.append(f"  - `{d.file_path}`: {d.old_risk} → {d.new_risk}")
+
+            if rnd.negotiation_messages:
+                lines.append(f"- **{t('negotiation_hdr')}**:")
+                for m in rnd.negotiation_messages:
+                    lines.append(f"  - **{m.sender}** (R{m.round_number}): {m.content}")
+
             if rnd.planner_revision_summary:
                 lines.append(
                     f"- **{t('planner_revision')}**: {rnd.planner_revision_summary}"

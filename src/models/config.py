@@ -138,6 +138,7 @@ class OutputConfig(BaseModel):
     include_llm_traces: bool = True
     structured_logs: bool = False
     language: str = "en"
+    debug_checkpoints: bool = False
 
 
 class SyntaxCheckConfig(BaseModel):
@@ -197,6 +198,38 @@ class GateConfig(BaseModel):
     commands: list[GateCommandConfig] = Field(default_factory=list)
 
 
+class MigrationConfig(BaseModel):
+    merge_base_override: str | None = Field(
+        default=None,
+        description="Override the git merge-base with a specific commit SHA. "
+        "Use this when the fork was created via code migration.",
+    )
+    auto_detect_sync_point: bool = Field(
+        default=True,
+        description="Automatically detect if upstream commits have already been "
+        "migrated into the fork.",
+    )
+    sync_detection_threshold: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Ratio of synced upstream-changed files that triggers migration "
+        "detection. 0.3 means >30% of files must be synced.",
+    )
+    min_synced_files: int = Field(
+        default=5,
+        ge=1,
+        description="Minimum number of synced files required to trigger detection. "
+        "Prevents false positives when few files changed.",
+    )
+
+
+class HistoryPreservationConfig(BaseModel):
+    enabled: bool = True
+    cherry_pick_clean: bool = True
+    commit_after_phase: bool = True
+
+
 class MergeConfig(BaseModel):
     upstream_ref: str = Field(
         ..., description="upstream branch ref, e.g. upstream/main"
@@ -226,6 +259,10 @@ class MergeConfig(BaseModel):
     layer_config: MergeLayerConfig = Field(default_factory=MergeLayerConfig)
     customizations: list[CustomizationEntry] = Field(default_factory=list)
     gate: GateConfig = Field(default_factory=GateConfig)
+    migration: MigrationConfig = Field(default_factory=MigrationConfig)
+    history: HistoryPreservationConfig = Field(
+        default_factory=HistoryPreservationConfig
+    )
     max_judge_repair_rounds: int = Field(default=3, ge=1, le=10)
 
     @field_validator("upstream_ref", "fork_ref")

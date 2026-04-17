@@ -95,3 +95,4 @@ output:
     - "markdown"
   include_raw_diffs: false
   include_llm_traces: false
+  debug_checkpoints: false   # true: keep all tagged checkpoints (debug tracing)

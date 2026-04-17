@@ -15,6 +15,8 @@ import type {
   MergeMemory,
   FileDecisionRecord,
   PlanReviewRound,
+  ReviewConclusion,
+  UserDecisionItem,
   ScreenId,
 } from "./types.js";
 
@@ -32,6 +34,8 @@ interface MergeStateSlice {
   judgeVerdict: JudgeVerdict | null;
   judgeRepairRounds: number;
   planReviewLog: PlanReviewRound[];
+  reviewConclusion: ReviewConclusion | null;
+  pendingUserDecisions: UserDecisionItem[];
   gateHistory: GateEntry[];
   errors: ErrorEntry[];
   messages: MessageEntry[];
@@ -94,6 +98,8 @@ export const useAppStore = create<AppStore>((set) => ({
   judgeVerdict: null,
   judgeRepairRounds: 0,
   planReviewLog: [],
+  reviewConclusion: null,
+  pendingUserDecisions: [],
   gateHistory: [],
   errors: [],
   messages: [],

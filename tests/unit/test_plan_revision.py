@@ -1,0 +1,615 @@
+import pytest
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
+
+from src.agents.planner_agent import PlannerAgent
+from src.models.config import MergeConfig, AgentLLMConfig
+from src.models.diff import RiskLevel, FileDiff, FileStatus, FileChangeCategory
+from src.models.plan import (
+    MergePlan,
+    MergePhase,
+    PhaseFileBatch,
+    RiskSummary,
+)
+from src.models.plan_judge import PlanIssue, PlanJudgeResult, PlanJudgeVerdict
+from src.models.plan_review import (
+    IssueResponseAction,
+    PlannerIssueResponse,
+    PlanDiffEntry,
+)
+from src.models.state import MergeState
+
+
+def _make_llm_config() -> AgentLLMConfig:
+    return AgentLLMConfig(
+        provider="anthropic", model="test-model", api_key_env="TEST_KEY"
+    )
+
+
+def _make_config() -> MergeConfig:
+    return MergeConfig(upstream_ref="upstream/main", fork_ref="origin/main")
+
+
+def _make_plan(
+    batches: list[tuple[str, list[str], str]],
+) -> MergePlan:
+    phases = []
+    for phase_str, paths, risk_str in batches:
+        phases.append(
+            PhaseFileBatch(
+                batch_id=str(uuid4()),
+                phase=MergePhase(phase_str),
+                file_paths=paths,
+                risk_level=RiskLevel(risk_str),
+                can_parallelize=True,
+            )
+        )
+
+    safe = sum(len(b.file_paths) for b in phases if b.risk_level == RiskLevel.AUTO_SAFE)
+    risky = sum(
+        len(b.file_paths) for b in phases if b.risk_level == RiskLevel.AUTO_RISKY
+    )
+    human = sum(
+        len(b.file_paths) for b in phases if b.risk_level == RiskLevel.HUMAN_REQUIRED
+    )
+    total = sum(len(b.file_paths) for b in phases)
+    rate = safe / total if total else 0.0
+
+    return MergePlan(
+        created_at=datetime.now(),
+        upstream_ref="upstream/main",
+        fork_ref="origin/main",
+        merge_base_commit="abc123",
+        phases=phases,
+        risk_summary=RiskSummary(
+            total_files=total,
+            auto_safe_count=safe,
+            auto_risky_count=risky,
+            human_required_count=human,
+            deleted_only_count=0,
+            binary_count=0,
+            excluded_count=0,
+            estimated_auto_merge_rate=rate,
+            top_risk_files=[],
+        ),
+        project_context_summary="test project",
+    )
+
+
+def _make_issue(fp: str, current: RiskLevel, suggested: RiskLevel) -> PlanIssue:
+    return PlanIssue(
+        file_path=fp,
+        current_classification=current,
+        suggested_classification=suggested,
+        reason="test reason",
+        issue_type="risk_underestimation",
+    )
+
+
+class TestApplyJudgeIssuesToPlan:
+    def _make_agent(self) -> PlannerAgent:
+        with patch.dict("os.environ", {"TEST_KEY": "sk-test-dummy"}):
+            return PlannerAgent(llm_config=_make_llm_config())
+
+    def test_escalate_auto_risky_to_human_required(self):
+        agent = self._make_agent()
+        plan = _make_plan(
+            [
+                ("auto_merge", ["a.py", "b.py", "c.py"], "auto_safe"),
+                ("conflict_analysis", ["d.py", "e.py"], "auto_risky"),
+            ]
+        )
+        issues = [
+            _make_issue("d.py", RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED),
+        ]
+
+        result = agent._apply_judge_issues_to_plan(plan, issues)
+
+        all_files = {fp for batch in result["phases"] for fp in batch["file_paths"]}
+        assert "d.py" in all_files, "d.py should still be in the plan"
+
+        human_files = []
+        for batch in result["phases"]:
+            if batch["risk_level"] == "human_required":
+                human_files.extend(batch["file_paths"])
+        assert "d.py" in human_files
+
+        risky_files = []
+        for batch in result["phases"]:
+            if batch["risk_level"] == "auto_risky":
+                risky_files.extend(batch["file_paths"])
+        assert "d.py" not in risky_files
+        assert "e.py" in risky_files
+
+    def test_reclassify_auto_safe_to_auto_risky(self):
+        agent = self._make_agent()
+        plan = _make_plan(
+            [
+                ("auto_merge", ["a.py", "b.py"], "auto_safe"),
+            ]
+        )
+        issues = [
+            _make_issue("b.py", RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY),
+        ]
+
+        result = agent._apply_judge_issues_to_plan(plan, issues)
+
+        all_files = {fp for batch in result["phases"] for fp in batch["file_paths"]}
+        assert "b.py" in all_files, "b.py must not be lost"
+
+        risky_files = []
+        for batch in result["phases"]:
+            if batch["risk_level"] == "auto_risky":
+                risky_files.extend(batch["file_paths"])
+        assert "b.py" in risky_files
+
+    def test_multiple_reclassifications_different_targets(self):
+        agent = self._make_agent()
+        plan = _make_plan(
+            [
+                ("auto_merge", ["a.py", "b.py", "c.py"], "auto_safe"),
+                ("conflict_analysis", ["d.py", "e.py", "f.py"], "auto_risky"),
+            ]
+        )
+        issues = [
+            _make_issue("b.py", RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY),
+            _make_issue("d.py", RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED),
+            _make_issue("f.py", RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED),
+        ]
+
+        result = agent._apply_judge_issues_to_plan(plan, issues)
+
+        all_files = {fp for batch in result["phases"] for fp in batch["file_paths"]}
+        assert all_files == {"a.py", "b.py", "c.py", "d.py", "e.py", "f.py"}
+
+        by_risk: dict[str, list[str]] = {}
+        for batch in result["phases"]:
+            by_risk.setdefault(batch["risk_level"], []).extend(batch["file_paths"])
+
+        assert set(by_risk.get("auto_safe", [])) == {"a.py", "c.py"}
+        assert "b.py" in by_risk.get("auto_risky", [])
+        assert "e.py" in by_risk.get("auto_risky", [])
+        assert set(by_risk.get("human_required", [])) == {"d.py", "f.py"}
+
+    def test_risk_summary_reflects_reclassification(self):
+        agent = self._make_agent()
+        plan = _make_plan(
+            [
+                ("auto_merge", ["a.py", "b.py"], "auto_safe"),
+                ("conflict_analysis", ["c.py"], "auto_risky"),
+            ]
+        )
+        issues = [
+            _make_issue("c.py", RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED),
+        ]
+
+        result = agent._apply_judge_issues_to_plan(plan, issues)
+        rs = result["risk_summary"]
+
+        assert rs["total_files"] == 3
+        assert rs["auto_safe_count"] == 2
+        assert rs["auto_risky_count"] == 0
+        assert rs["human_required_count"] == 1
+
+    def test_no_files_lost(self):
+        agent = self._make_agent()
+        plan = _make_plan(
+            [
+                ("auto_merge", ["a.py", "b.py", "c.py", "d.py"], "auto_safe"),
+                ("conflict_analysis", ["e.py", "f.py"], "auto_risky"),
+            ]
+        )
+        issues = [
+            _make_issue("a.py", RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY),
+            _make_issue("e.py", RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED),
+        ]
+
+        result = agent._apply_judge_issues_to_plan(plan, issues)
+
+        original_files = {"a.py", "b.py", "c.py", "d.py", "e.py", "f.py"}
+        result_files = {fp for batch in result["phases"] for fp in batch["file_paths"]}
+        assert result_files == original_files
+
+    def test_merge_into_existing_batch(self):
+        agent = self._make_agent()
+        plan = _make_plan(
+            [
+                ("auto_merge", ["a.py", "b.py"], "auto_safe"),
+                ("conflict_analysis", ["c.py"], "auto_risky"),
+                ("human_review", ["d.py"], "human_required"),
+            ]
+        )
+        issues = [
+            _make_issue("c.py", RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED),
+        ]
+
+        result = agent._apply_judge_issues_to_plan(plan, issues)
+
+        human_files = []
+        for batch in result["phases"]:
+            if batch["risk_level"] == "human_required":
+                human_files.extend(batch["file_paths"])
+        assert "c.py" in human_files
+        assert "d.py" in human_files
+
+
+class TestPlannerEvaluateIssues:
+    def _make_agent(self) -> PlannerAgent:
+        with patch.dict("os.environ", {"TEST_KEY": "sk-test-dummy"}):
+            return PlannerAgent(llm_config=_make_llm_config())
+
+    @pytest.mark.asyncio
+    async def test_large_plan_still_evaluates_via_llm(self):
+        agent = self._make_agent()
+        large_files = [f"file_{i}.py" for i in range(250)]
+        plan = _make_plan([("auto_merge", large_files, "auto_safe")])
+        issues = [
+            _make_issue("file_0.py", RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY),
+        ]
+
+        agent._call_llm_with_retry = AsyncMock(
+            return_value='{"responses": [{"issue_id": "'
+            + issues[0].issue_id
+            + '", "file_path": "file_0.py", "action": "reject", '
+            + '"reason": "config only, low risk", "counter_proposal": null}]}'
+        )
+
+        responses = await agent._evaluate_judge_issues(plan, issues)
+
+        assert len(responses) == 1
+        assert responses[0].action == IssueResponseAction.REJECT
+        assert "config only" in responses[0].reason
+
+    @pytest.mark.asyncio
+    async def test_revise_plan_returns_tuple(self):
+        agent = self._make_agent()
+        plan = _make_plan(
+            [
+                ("auto_merge", ["a.py", "b.py"], "auto_safe"),
+                ("conflict_analysis", ["c.py"], "auto_risky"),
+            ]
+        )
+        state = MergeState(config=_make_config())
+        state.merge_plan = plan
+
+        issues = [
+            _make_issue("c.py", RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED),
+        ]
+
+        agent._call_llm_with_retry = AsyncMock(
+            return_value='{"responses": [{"issue_id": "'
+            + issues[0].issue_id
+            + '", "file_path": "c.py", "action": "accept", "reason": "agreed", "counter_proposal": null}]}'
+        )
+
+        result = await agent.revise_plan(state, issues)
+
+        assert isinstance(result, tuple)
+        assert len(result) == 3
+        revised_plan, responses, diff_entries = result
+        assert isinstance(revised_plan, MergePlan)
+        assert len(responses) == 1
+        assert responses[0].action == IssueResponseAction.ACCEPT
+
+    @pytest.mark.asyncio
+    async def test_revise_plan_rejected_issues_keep_classification(self):
+        agent = self._make_agent()
+        plan = _make_plan(
+            [
+                ("auto_merge", ["a.py"], "auto_safe"),
+                ("conflict_analysis", ["b.py"], "auto_risky"),
+            ]
+        )
+        state = MergeState(config=_make_config())
+        state.merge_plan = plan
+
+        issues = [
+            _make_issue("b.py", RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED),
+        ]
+
+        agent._call_llm_with_retry = AsyncMock(
+            return_value='{"responses": [{"issue_id": "'
+            + issues[0].issue_id
+            + '", "file_path": "b.py", "action": "reject", "reason": "low risk file", "counter_proposal": null}]}'
+        )
+
+        revised_plan, responses, diff_entries = await agent.revise_plan(state, issues)
+
+        assert responses[0].action == IssueResponseAction.REJECT
+
+        risky_files = []
+        for batch in revised_plan.phases:
+            if batch.risk_level == RiskLevel.AUTO_RISKY:
+                risky_files.extend(batch.file_paths)
+        assert "b.py" in risky_files
+
+        assert len(diff_entries) == 0
+
+
+class TestPlanReviewConvergence:
+    @pytest.mark.asyncio
+    async def test_stalls_when_plan_unchanged(self):
+        from src.core.phases.plan_review import PlanReviewPhase
+        from src.models.state import SystemStatus
+
+        plan = _make_plan(
+            [
+                ("auto_merge", ["a.py"], "auto_safe"),
+                ("conflict_analysis", ["b.py"], "auto_risky"),
+            ]
+        )
+
+        state = MergeState(config=_make_config())
+        state.merge_plan = plan
+        state.file_classifications = {
+            fp: batch.risk_level for batch in plan.phases for fp in batch.file_paths
+        }
+
+        verdict = PlanJudgeVerdict(
+            result=PlanJudgeResult.REVISION_NEEDED,
+            issues=[
+                _make_issue("b.py", RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED),
+            ],
+            approved_files_count=1,
+            flagged_files_count=1,
+            summary="Issues found",
+            judge_model="test",
+            timestamp=datetime.now(),
+        )
+
+        reject_response = PlannerIssueResponse(
+            issue_id=verdict.issues[0].issue_id,
+            file_path="b.py",
+            action=IssueResponseAction.REJECT,
+            reason="Low risk file, no need to escalate",
+        )
+
+        mock_judge = AsyncMock()
+        mock_judge.review_plan = AsyncMock(return_value=verdict)
+
+        mock_planner = AsyncMock()
+        mock_planner.revise_plan = AsyncMock(return_value=(plan, [reject_response], []))
+
+        mock_sm = MagicMock()
+        mock_sm.transition = MagicMock()
+
+        mock_config = MagicMock()
+        mock_config.max_plan_revision_rounds = 5
+        mock_config.output.directory = "/tmp/test_output"
+        mock_config.output.language = "en"
+
+        ctx = MagicMock()
+        ctx.agents = {"planner": mock_planner, "planner_judge": mock_judge}
+        ctx.config = mock_config
+        ctx.state_machine = mock_sm
+
+        phase = PlanReviewPhase()
+
+        with patch("src.core.phases.plan_review.write_plan_review_report"):
+            outcome = await phase.execute(state, ctx)
+
+        assert outcome.target_status == SystemStatus.AWAITING_HUMAN
+        assert "stalled" in outcome.reason
+
+        assert mock_planner.revise_plan.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_approved_generates_user_decision_items(self):
+        from src.core.phases.plan_review import PlanReviewPhase
+        from src.models.state import SystemStatus
+
+        plan = _make_plan(
+            [
+                ("auto_merge", ["a.py"], "auto_safe"),
+                ("human_review", ["b.py"], "human_required"),
+            ]
+        )
+
+        state = MergeState(config=_make_config())
+        state.merge_plan = plan
+
+        verdict = PlanJudgeVerdict(
+            result=PlanJudgeResult.APPROVED,
+            issues=[],
+            approved_files_count=2,
+            flagged_files_count=0,
+            summary="Plan looks good",
+            judge_model="test",
+            timestamp=datetime.now(),
+        )
+
+        mock_judge = AsyncMock()
+        mock_judge.review_plan = AsyncMock(return_value=verdict)
+
+        mock_planner = AsyncMock()
+
+        mock_sm = MagicMock()
+        mock_sm.transition = MagicMock()
+
+        mock_config = MagicMock()
+        mock_config.max_plan_revision_rounds = 3
+        mock_config.output.directory = "/tmp/test_output"
+        mock_config.output.language = "en"
+
+        ctx = MagicMock()
+        ctx.agents = {"planner": mock_planner, "planner_judge": mock_judge}
+        ctx.config = mock_config
+        ctx.state_machine = mock_sm
+
+        phase = PlanReviewPhase()
+
+        with patch("src.core.phases.plan_review.write_plan_review_report"):
+            outcome = await phase.execute(state, ctx)
+
+        assert outcome.target_status == SystemStatus.AWAITING_HUMAN
+        assert len(state.pending_user_decisions) == 1
+        assert state.pending_user_decisions[0].file_path == "b.py"
+        assert len(state.pending_user_decisions[0].options) == 3
+
+
+class TestClassifyPriorIssues:
+    def test_resolved_when_classification_matches_suggestion(self):
+        from src.llm.prompts.planner_judge_prompts import classify_prior_issues
+
+        issues = [
+            _make_issue("a.py", RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED),
+            _make_issue("b.py", RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY),
+        ]
+        current = {
+            "a.py": RiskLevel.HUMAN_REQUIRED,
+            "b.py": RiskLevel.AUTO_RISKY,
+        }
+
+        resolved, still_open = classify_prior_issues(issues, current)
+        assert len(resolved) == 2
+        assert len(still_open) == 0
+
+    def test_still_open_when_not_reclassified(self):
+        from src.llm.prompts.planner_judge_prompts import classify_prior_issues
+
+        issues = [
+            _make_issue("a.py", RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED),
+            _make_issue("b.py", RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY),
+        ]
+        current = {
+            "a.py": RiskLevel.AUTO_RISKY,
+            "b.py": RiskLevel.AUTO_SAFE,
+        }
+
+        resolved, still_open = classify_prior_issues(issues, current)
+        assert len(resolved) == 0
+        assert len(still_open) == 2
+
+    def test_mixed_resolved_and_open(self):
+        from src.llm.prompts.planner_judge_prompts import classify_prior_issues
+
+        issues = [
+            _make_issue("a.py", RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED),
+            _make_issue("b.py", RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY),
+        ]
+        current = {
+            "a.py": RiskLevel.HUMAN_REQUIRED,
+            "b.py": RiskLevel.AUTO_SAFE,
+        }
+
+        resolved, still_open = classify_prior_issues(issues, current)
+        assert len(resolved) == 1
+        assert resolved[0].file_path == "a.py"
+        assert len(still_open) == 1
+        assert still_open[0].file_path == "b.py"
+
+
+class TestBuildPlanReviewPromptHistory:
+    def test_round_zero_has_no_history_section(self):
+        from src.llm.prompts.planner_judge_prompts import build_plan_review_prompt
+
+        plan = _make_plan([("auto_merge", ["a.py"], "auto_safe")])
+        prompt = build_plan_review_prompt(plan, [], lang="en", revision_round=0)
+
+        assert "Prior Review History" not in prompt
+        assert "Resolved" not in prompt
+
+    def test_round_one_includes_resolved_and_open(self):
+        from src.llm.prompts.planner_judge_prompts import build_plan_review_prompt
+
+        plan = _make_plan([("auto_merge", ["a.py"], "auto_safe")])
+        resolved = [_make_issue("x.py", RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY)]
+        still_open = [
+            _make_issue("y.py", RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED)
+        ]
+
+        prompt = build_plan_review_prompt(
+            plan,
+            [],
+            lang="en",
+            revision_round=1,
+            prior_resolved=resolved,
+            prior_still_open=still_open,
+        )
+
+        assert "Prior Review History" in prompt
+        assert "x.py" in prompt
+        assert "Resolved" in prompt
+        assert "y.py" in prompt
+        assert "Still Open" in prompt
+        assert "Do NOT re-raise" in prompt
+
+    def test_zh_lang_uses_chinese_headers(self):
+        from src.llm.prompts.planner_judge_prompts import build_plan_review_prompt
+
+        plan = _make_plan([("auto_merge", ["a.py"], "auto_safe")])
+        resolved = [_make_issue("x.py", RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY)]
+
+        prompt = build_plan_review_prompt(
+            plan,
+            [],
+            lang="zh",
+            revision_round=1,
+            prior_resolved=resolved,
+            prior_still_open=[],
+        )
+
+        assert "已解决" in prompt
+        assert "仍未解决" in prompt
+
+    def test_review_plan_passes_prior_issues_to_prompt(self):
+        from src.llm.prompts.planner_judge_prompts import build_plan_review_prompt
+
+        plan = _make_plan(
+            [
+                ("auto_merge", ["a.py", "b.py"], "auto_safe"),
+                ("human_review", ["c.py"], "human_required"),
+            ]
+        )
+
+        prompt = build_plan_review_prompt(
+            plan,
+            [],
+            lang="en",
+            revision_round=2,
+            prior_resolved=[
+                _make_issue("c.py", RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED)
+            ],
+            prior_still_open=[
+                _make_issue("b.py", RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY)
+            ],
+        )
+
+        assert "c.py" in prompt
+        assert "b.py" in prompt
+        assert "round 2" in prompt
+
+    def test_planner_responses_included_in_prompt(self):
+        from src.llm.prompts.planner_judge_prompts import build_plan_review_prompt
+
+        plan = _make_plan([("auto_merge", ["a.py"], "auto_safe")])
+        responses = [
+            PlannerIssueResponse(
+                issue_id="test-1",
+                file_path="x.py",
+                action=IssueResponseAction.REJECT,
+                reason="File is low risk config",
+            ),
+            PlannerIssueResponse(
+                issue_id="test-2",
+                file_path="y.py",
+                action=IssueResponseAction.ACCEPT,
+                reason="Agreed, security sensitive",
+            ),
+        ]
+
+        prompt = build_plan_review_prompt(
+            plan,
+            [],
+            lang="en",
+            revision_round=1,
+            planner_responses=responses,
+        )
+
+        assert "Planner's Responses" in prompt
+        assert "Rejected" in prompt
+        assert "x.py" in prompt
+        assert "File is low risk config" in prompt
+        assert "Accepted" in prompt
+        assert "y.py" in prompt

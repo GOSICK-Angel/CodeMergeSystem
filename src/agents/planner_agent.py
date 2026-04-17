@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 from src.agents.base_agent import BaseAgent
 from src.models.config import AgentLLMConfig, MergeConfig
@@ -19,9 +19,16 @@ from src.models.plan_judge import PlanIssue
 from src.models.state import MergeState
 from src.llm.prompts.planner_prompts import (
     PLANNER_SYSTEM,
+    PLANNER_EVALUATION_SYSTEM,
     get_planner_system,
     build_classification_prompt,
     build_revision_prompt,
+    build_evaluation_prompt,
+)
+from src.models.plan_review import (
+    PlannerIssueResponse,
+    IssueResponseAction,
+    PlanDiffEntry,
 )
 from src.tools.file_classifier import compute_risk_score, classify_file
 import fnmatch
@@ -52,12 +59,7 @@ class PlannerAgent(BaseAgent):
         )
 
     async def _generate_plan(self, state: MergeState) -> MergePlan:
-        all_file_diffs: list[FileDiff] = []
-
-        if hasattr(state, "_file_diffs") and state._file_diffs:
-            all_file_diffs = state._file_diffs
-        else:
-            all_file_diffs = []
+        all_file_diffs: list[FileDiff] = state.file_diffs
 
         if state.file_categories:
             return self._build_layered_plan(all_file_diffs, state)
@@ -640,60 +642,154 @@ class PlannerAgent(BaseAgent):
         self,
         state: MergeState,
         judge_issues: list[PlanIssue],
-    ) -> MergePlan:
+        lang: str = "en",
+    ) -> tuple[MergePlan, list[PlannerIssueResponse], list[PlanDiffEntry]]:
         if state.merge_plan is None:
             raise ValueError("No existing plan to revise")
 
-        total_files = sum(len(b.file_paths) for b in state.merge_plan.phases)
-        if total_files > 200:
-            self.logger.info(
-                "Large plan (%d files) — using deterministic revision for %d issues",
-                total_files,
-                len(judge_issues),
-            )
-            plan_data = self._apply_judge_issues_to_plan(state.merge_plan, judge_issues)
-        else:
-            prompt = build_revision_prompt(state.merge_plan, judge_issues)
-            messages = [{"role": "user", "content": prompt}]
-            try:
-                raw_response = await self._call_llm_with_retry(
-                    messages, system=PLANNER_SYSTEM
-                )
-                raw_str = str(raw_response).strip()
-                if raw_str.startswith("```"):
-                    lines = raw_str.splitlines()
-                    raw_str = "\n".join(
-                        lines[1:-1] if lines[-1] == "```" else lines[1:]
-                    )
-                plan_data = json.loads(raw_str)
-            except Exception:
-                plan_data = self._apply_judge_issues_to_plan(
-                    state.merge_plan, judge_issues
-                )
+        old_classifications = {
+            fp: batch.risk_level
+            for batch in state.merge_plan.phases
+            for fp in batch.file_paths
+        }
 
-        file_diffs: list[FileDiff] = getattr(state, "_file_diffs", None) or []
+        responses = await self._evaluate_judge_issues(
+            state.merge_plan, judge_issues, lang
+        )
+
+        accepted_issues = [
+            issue
+            for issue, resp in zip(judge_issues, responses)
+            if resp.action == IssueResponseAction.ACCEPT
+        ]
+
+        if accepted_issues:
+            plan_data = self._apply_judge_issues_to_plan(
+                state.merge_plan, accepted_issues
+            )
+        else:
+            plan_data = self._plan_to_data(state.merge_plan)
+
+        file_diffs: list[FileDiff] = state.file_diffs
         plan = self._build_merge_plan(plan_data, state, file_diffs)
 
-        actionable: dict[str, FileChangeCategory] = {}
-        if state.file_categories:
-            actionable_cats = {
-                FileChangeCategory.B,
-                FileChangeCategory.C,
-                FileChangeCategory.D_MISSING,
-            }
-            actionable = {
-                fp: cat
-                for fp, cat in state.file_categories.items()
-                if cat in actionable_cats
-            }
-        if file_diffs and actionable:
-            plan = plan.model_copy(
-                update={
-                    "risk_summary": self._build_risk_summary(file_diffs, actionable)
-                }
+        new_classifications = {
+            fp: batch.risk_level for batch in plan.phases for fp in batch.file_paths
+        }
+
+        diff_entries: list[PlanDiffEntry] = []
+        all_fps = set(old_classifications) | set(new_classifications)
+        for fp in sorted(all_fps):
+            old_r = old_classifications.get(fp)
+            new_r = new_classifications.get(fp)
+            if old_r != new_r:
+                diff_entries.append(
+                    PlanDiffEntry(
+                        file_path=fp,
+                        old_risk=old_r.value if old_r else "removed",
+                        new_risk=new_r.value if new_r else "removed",
+                    )
+                )
+
+        return plan, responses, diff_entries
+
+    async def _evaluate_judge_issues(
+        self,
+        plan: MergePlan,
+        judge_issues: list[PlanIssue],
+        lang: str = "en",
+    ) -> list[PlannerIssueResponse]:
+        if not judge_issues:
+            return []
+
+        prompt = build_evaluation_prompt(plan, judge_issues, lang)
+        messages = [{"role": "user", "content": prompt}]
+
+        try:
+            raw = await self._call_llm_with_retry(
+                messages, system=PLANNER_EVALUATION_SYSTEM
+            )
+            raw_str = str(raw).strip()
+            if raw_str.startswith("```"):
+                lines = raw_str.splitlines()
+                raw_str = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+            data = json.loads(raw_str)
+            raw_responses = data.get("responses", [])
+        except Exception as e:
+            self.logger.warning("Evaluation LLM failed, auto-accepting: %s", e)
+            return [
+                PlannerIssueResponse(
+                    issue_id=issue.issue_id,
+                    file_path=issue.file_path,
+                    action=IssueResponseAction.ACCEPT,
+                    reason=f"Auto-accepted (evaluation failed: {e})",
+                )
+                for issue in judge_issues
+            ]
+
+        issue_map = {issue.issue_id: issue for issue in judge_issues}
+        responses: list[PlannerIssueResponse] = []
+        seen_ids: set[str] = set()
+
+        for resp_data in raw_responses:
+            iid = resp_data.get("issue_id", "")
+            if iid in seen_ids or iid not in issue_map:
+                continue
+            seen_ids.add(iid)
+
+            try:
+                action = IssueResponseAction(resp_data.get("action", "accept"))
+            except ValueError:
+                action = IssueResponseAction.ACCEPT
+
+            responses.append(
+                PlannerIssueResponse(
+                    issue_id=iid,
+                    file_path=resp_data.get("file_path", issue_map[iid].file_path),
+                    action=action,
+                    reason=resp_data.get("reason", ""),
+                    counter_proposal=resp_data.get("counter_proposal"),
+                )
             )
 
-        return plan
+        for issue in judge_issues:
+            if issue.issue_id not in seen_ids:
+                responses.append(
+                    PlannerIssueResponse(
+                        issue_id=issue.issue_id,
+                        file_path=issue.file_path,
+                        action=IssueResponseAction.ACCEPT,
+                        reason="No explicit response from planner — defaulting to accept",
+                    )
+                )
+
+        return responses
+
+    def _plan_to_data(self, plan: MergePlan) -> dict[str, Any]:
+        return {
+            "phases": [
+                {
+                    "batch_id": b.batch_id,
+                    "phase": b.phase.value,
+                    "file_paths": b.file_paths,
+                    "risk_level": b.risk_level.value,
+                    "can_parallelize": b.can_parallelize,
+                }
+                for b in plan.phases
+            ],
+            "risk_summary": plan.risk_summary.model_dump(mode="json"),
+            "project_context_summary": plan.project_context_summary,
+            "special_instructions": plan.special_instructions,
+        }
+
+    _RISK_TO_PHASE: dict[str, str] = {
+        "auto_safe": "auto_merge",
+        "auto_risky": "conflict_analysis",
+        "human_required": "human_review",
+        "deleted_only": "auto_merge",
+        "binary": "auto_merge",
+        "excluded": "auto_merge",
+    }
 
     def _apply_judge_issues_to_plan(
         self, original_plan: MergePlan, judge_issues: list[PlanIssue]
@@ -717,31 +813,65 @@ class PlannerAgent(BaseAgent):
                     }
                 )
 
-        escalated = [fp for fp in reclassify if reclassify[fp] == "human_required"]
-        if escalated:
-            phases_data.append(
-                {
-                    "batch_id": str(uuid4()),
-                    "phase": "human_review",
-                    "file_paths": escalated,
-                    "risk_level": "human_required",
-                    "can_parallelize": False,
-                }
-            )
+        grouped: dict[str, list[str]] = {}
+        for fp, target_risk in reclassify.items():
+            grouped.setdefault(target_risk, []).append(fp)
 
-        rs = original_plan.risk_summary
+        for target_risk, fps in grouped.items():
+            target_phase = self._RISK_TO_PHASE.get(target_risk, "human_review")
+            can_parallel = target_risk not in ("human_required",)
+            merged = False
+            for batch_data in phases_data:
+                if batch_data["risk_level"] == target_risk:
+                    cast(list[str], batch_data["file_paths"]).extend(fps)
+                    merged = True
+                    break
+            if not merged:
+                phases_data.append(
+                    {
+                        "batch_id": str(uuid4()),
+                        "phase": target_phase,
+                        "file_paths": fps,
+                        "risk_level": target_risk,
+                        "can_parallelize": can_parallel,
+                    }
+                )
+
+        counts: dict[str, int] = {
+            "auto_safe": 0,
+            "auto_risky": 0,
+            "human_required": 0,
+            "deleted_only": 0,
+            "binary": 0,
+            "excluded": 0,
+        }
+        total_files = 0
+        top_risk: list[str] = []
+        for batch_data in phases_data:
+            paths = cast(list[str], batch_data["file_paths"])
+            n = len(paths)
+            total_files += n
+            rl = cast(str, batch_data["risk_level"])
+            if rl in counts:
+                counts[rl] += n
+            if rl == "human_required":
+                top_risk.extend(paths)
+
+        auto_count = counts["auto_safe"] + counts["deleted_only"]
+        rate = auto_count / total_files if total_files > 0 else 0.0
+
         return {
             "phases": phases_data,
             "risk_summary": {
-                "total_files": rs.total_files,
-                "auto_safe_count": rs.auto_safe_count,
-                "auto_risky_count": rs.auto_risky_count,
-                "human_required_count": rs.human_required_count + len(escalated),
-                "deleted_only_count": rs.deleted_only_count,
-                "binary_count": rs.binary_count,
-                "excluded_count": rs.excluded_count,
-                "estimated_auto_merge_rate": rs.estimated_auto_merge_rate,
-                "top_risk_files": rs.top_risk_files,
+                "total_files": total_files,
+                "auto_safe_count": counts["auto_safe"],
+                "auto_risky_count": counts["auto_risky"],
+                "human_required_count": counts["human_required"],
+                "deleted_only_count": counts["deleted_only"],
+                "binary_count": counts["binary"],
+                "excluded_count": counts["excluded"],
+                "estimated_auto_merge_rate": rate,
+                "top_risk_files": top_risk[:20],
             },
             "project_context_summary": original_plan.project_context_summary,
             "special_instructions": original_plan.special_instructions,
@@ -768,7 +898,8 @@ class PlannerAgent(BaseAgent):
             for fp, new_level in dispute.suggested_reclassification.items()
         ]
 
-        return await self.revise_plan(state, issues)
+        plan, _responses, _diff = await self.revise_plan(state, issues)
+        return plan
 
     async def _enhance_risk_scores(
         self, file_diffs: list[FileDiff], config: MergeConfig

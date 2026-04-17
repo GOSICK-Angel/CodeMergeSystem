@@ -99,7 +99,10 @@ def compute_risk_score(file_diff: FileDiff, config: FileClassifierConfig) -> flo
     if matches_any_pattern(file_diff.file_path, config.always_take_target_patterns):
         return 0.1
 
-    if matches_any_pattern(file_diff.file_path, config.security_sensitive.patterns):
+    no_content_change = file_diff.lines_added == 0 and file_diff.lines_deleted == 0
+    if not no_content_change and matches_any_pattern(
+        file_diff.file_path, config.security_sensitive.patterns
+    ):
         return float(max(raw_score, 0.8))
 
     return float(round(raw_score, 3))

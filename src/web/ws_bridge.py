@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import datetime
@@ -32,8 +33,10 @@ class MergeWSBridge:
         )
         self._debounce_handle: asyncio.TimerHandle | None = None
         self._pending_broadcast: bool = False
+        self._last_snapshot_hash: str = ""
         self._client_connected: asyncio.Event = asyncio.Event()
         self._plan_review_received: asyncio.Event = asyncio.Event()
+        self._human_decisions_received: asyncio.Event = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self, host: str = "localhost", port: int = 8765) -> None:
@@ -62,6 +65,11 @@ class MergeWSBridge:
         """Block until a plan review decision arrives from the TUI."""
         await self._plan_review_received.wait()
         self._plan_review_received.clear()
+
+    async def wait_for_human_decisions(self) -> None:
+        """Block until all pending conflict decisions are submitted from the TUI."""
+        await self._human_decisions_received.wait()
+        self._human_decisions_received.clear()
 
     async def _handler(self, ws: ServerConnection) -> None:
         self._clients.add(ws)
@@ -146,15 +154,36 @@ class MergeWSBridge:
             else None,
             "judgeRepairRounds": s.judge_repair_rounds,
             "planReviewLog": [
+                self._serialize_review_round(r) for r in s.plan_review_log
+            ],
+            "reviewConclusion": self._serialize_review_conclusion(),
+            "pendingUserDecisions": [
                 {
-                    "round_number": r.round_number,
-                    "verdict_result": r.verdict_result.value
-                    if hasattr(r.verdict_result, "value")
-                    else str(r.verdict_result),
-                    "verdict_summary": r.verdict_summary,
-                    "issues_count": r.issues_count,
+                    "item_id": item.item_id,
+                    "file_path": item.file_path,
+                    "description": item.description,
+                    "risk_context": item.risk_context,
+                    "current_classification": item.current_classification,
+                    "options": [
+                        {
+                            "key": opt.key
+                            if hasattr(opt, "key")
+                            else opt.get("key", ""),
+                            "label": opt.label
+                            if hasattr(opt, "label")
+                            else opt.get("label", ""),
+                            "description": opt.description
+                            if hasattr(opt, "description")
+                            else opt.get("description", ""),
+                        }
+                        if hasattr(opt, "key")
+                        else opt
+                        for opt in item.options
+                    ],
+                    "user_choice": item.user_choice,
+                    "user_input": item.user_input,
                 }
-                for r in s.plan_review_log
+                for item in s.pending_user_decisions
             ],
             "gateHistory": s.gate_history,
             "errors": s.errors,
@@ -177,7 +206,7 @@ class MergeWSBridge:
         }
 
     def _serialize_file_diffs(self) -> list[dict[str, Any]]:
-        diffs: list[Any] = getattr(self._state, "_file_diffs", None) or []
+        diffs: list[Any] = self._state.file_diffs
         result: list[dict[str, Any]] = []
         for fd in diffs:
             result.append(
@@ -255,8 +284,14 @@ class MergeWSBridge:
             "priority": req.priority,
             "conflict_points": [
                 {
-                    "description": cp.description,
-                    "severity": cp.severity,
+                    "description": f"{cp.conflict_type.value}: {cp.rationale}",
+                    "severity": (
+                        "high"
+                        if cp.confidence >= 0.7
+                        else "medium"
+                        if cp.confidence >= 0.4
+                        else "low"
+                    ),
                     "line_range": getattr(cp, "line_range", ""),
                 }
                 for cp in req.conflict_points
@@ -311,6 +346,69 @@ class MergeWSBridge:
             ],
         }
 
+    def _serialize_review_round(self, r: Any) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "round_number": r.round_number,
+            "verdict_result": r.verdict_result.value
+            if hasattr(r.verdict_result, "value")
+            else str(r.verdict_result),
+            "verdict_summary": r.verdict_summary,
+            "issues_count": r.issues_count,
+            "issues_detail": r.issues_detail,
+            "planner_revision_summary": r.planner_revision_summary,
+            "planner_responses": [
+                {
+                    "issue_id": pr.issue_id,
+                    "file_path": pr.file_path,
+                    "action": pr.action.value
+                    if hasattr(pr.action, "value")
+                    else str(pr.action),
+                    "reason": pr.reason,
+                    "counter_proposal": pr.counter_proposal,
+                }
+                for pr in (r.planner_responses or [])
+            ],
+            "plan_diff": [
+                {
+                    "file_path": d.file_path,
+                    "old_risk": d.old_risk,
+                    "new_risk": d.new_risk,
+                }
+                for d in (r.plan_diff or [])
+            ],
+            "negotiation_messages": [
+                {
+                    "sender": m.sender,
+                    "round_number": m.round_number,
+                    "content": m.content,
+                    "timestamp": m.timestamp.isoformat()
+                    if hasattr(m.timestamp, "isoformat")
+                    else str(m.timestamp),
+                }
+                for m in (r.negotiation_messages or [])
+            ],
+            "timestamp": r.timestamp.isoformat()
+            if hasattr(r.timestamp, "isoformat")
+            else str(r.timestamp),
+        }
+        return result
+
+    def _serialize_review_conclusion(self) -> dict[str, Any] | None:
+        rc = self._state.review_conclusion
+        if rc is None:
+            return None
+        return {
+            "reason": rc.reason.value
+            if hasattr(rc.reason, "value")
+            else str(rc.reason),
+            "final_round": rc.final_round,
+            "total_rounds": rc.total_rounds,
+            "max_rounds": rc.max_rounds,
+            "summary": rc.summary,
+            "pending_decisions_count": rc.pending_decisions_count,
+            "rejection_details": rc.rejection_details,
+        }
+
     async def _handle_command(self, ws: ServerConnection, msg: dict[str, Any]) -> None:
         cmd_type = msg.get("type", "")
         payload = msg.get("payload", {})
@@ -323,7 +421,11 @@ class MergeWSBridge:
             await self.broadcast_state_patch()
 
         elif cmd_type == "submit_plan_review":
-            self._apply_plan_review(payload.get("decision", ""))
+            self._apply_plan_review(payload)
+            await self.broadcast_state_patch()
+
+        elif cmd_type == "submit_user_plan_decisions":
+            self._apply_user_plan_decisions(payload.get("items", []))
             await self.broadcast_state_patch()
 
         elif cmd_type == "pause":
@@ -346,26 +448,66 @@ class MergeWSBridge:
         self._state.human_decisions[file_path] = merge_decision
         logger.info("TUI decision: %s -> %s", file_path, decision)
 
-    def _apply_plan_review(self, decision: str) -> None:
+        all_decided = all(
+            r.human_decision is not None
+            for r in self._state.human_decision_requests.values()
+        )
+        if all_decided:
+            self._human_decisions_received.set()
+            logger.info(
+                "All human conflict decisions received — signalling orchestrator"
+            )
+
+    def _apply_plan_review(self, payload: Any) -> None:
+        if isinstance(payload, str):
+            decision_str = payload
+            notes = None
+        else:
+            decision_str = payload.get("decision", "")
+            notes = payload.get("notes")
+
         decision_map = {
             "approve": PlanHumanDecision.APPROVE,
             "reject": PlanHumanDecision.REJECT,
             "modify": PlanHumanDecision.MODIFY,
         }
-        pd = decision_map.get(decision)
+        pd = decision_map.get(decision_str)
         if pd is None:
             return
 
         self._state.plan_human_review = PlanHumanReview(
             decision=pd,
             reviewer_name="tui_user",
+            reviewer_notes=notes,
+            item_decisions=list(self._state.pending_user_decisions),
             decided_at=datetime.now(),
         )
         self._plan_review_received.set()
-        logger.info("TUI plan review decision: %s", decision)
+        logger.info("TUI plan review decision: %s", decision_str)
+
+    def _apply_user_plan_decisions(self, items: list[dict[str, Any]]) -> None:
+        item_map = {item.item_id: item for item in self._state.pending_user_decisions}
+        for item_data in items:
+            item_id = item_data.get("item_id", "")
+            if item_id not in item_map:
+                continue
+            existing = item_map[item_id]
+            updated = existing.model_copy(
+                update={
+                    "user_choice": item_data.get("user_choice"),
+                    "user_input": item_data.get("user_input"),
+                }
+            )
+            idx = next(
+                i
+                for i, it in enumerate(self._state.pending_user_decisions)
+                if it.item_id == item_id
+            )
+            self._state.pending_user_decisions[idx] = updated
+        logger.info("TUI user plan decisions received: %d items", len(items))
 
     async def broadcast_state_patch(self) -> None:
-        """Send full state to all connected clients."""
+        """Send full state to all connected clients, skipping if unchanged."""
         if not self._clients:
             return
         data = json.dumps(
@@ -375,6 +517,10 @@ class MergeWSBridge:
             },
             default=str,
         )
+        data_hash = hashlib.md5(data.encode()).hexdigest()
+        if data_hash == self._last_snapshot_hash:
+            return
+        self._last_snapshot_hash = data_hash
         await asyncio.gather(
             *(ws.send(data) for ws in self._clients),
             return_exceptions=True,

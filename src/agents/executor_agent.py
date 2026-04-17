@@ -41,9 +41,8 @@ class ExecutorAgent(BaseAgent):
         disputes: list[str] = []
 
         file_diffs_map: dict[str, FileDiff] = {}
-        if hasattr(state, "_file_diffs"):
-            for fd in state._file_diffs or []:
-                file_diffs_map[fd.file_path] = fd
+        for fd in state.file_diffs:
+            file_diffs_map[fd.file_path] = fd
 
         for batch in state.merge_plan.phases:
             if batch.risk_level not in (RiskLevel.AUTO_SAFE, RiskLevel.DELETED_ONLY):
@@ -349,9 +348,8 @@ class ExecutorAgent(BaseAgent):
             )
 
         fd_map: dict[str, FileDiff] = {}
-        if hasattr(state, "_file_diffs"):
-            for fd in state._file_diffs or []:
-                fd_map[fd.file_path] = fd
+        for fd in state.file_diffs:
+            fd_map[fd.file_path] = fd
 
         fd = fd_map.get(request.file_path)
         if fd is None:

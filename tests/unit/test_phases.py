@@ -138,7 +138,8 @@ class TestPlanningPhase:
 
 class TestPlanReviewPhase:
     @pytest.mark.asyncio
-    async def test_approved(self):
+    async def test_approved_no_human_required_skips_await(self):
+        """When plan is approved with no HUMAN_REQUIRED files, go straight to AUTO_MERGING."""
         from src.models.plan_judge import PlanJudgeResult, PlanJudgeVerdict
 
         verdict = PlanJudgeVerdict(
@@ -154,7 +155,48 @@ class TestPlanReviewPhase:
         planner_judge.review_plan = AsyncMock(return_value=verdict)
 
         state = _make_state(status=SystemStatus.PLAN_REVIEWING)
-        state.merge_plan = _make_plan()
+        state.merge_plan = _make_plan()  # only auto_safe files
+
+        ctx = _make_ctx(agents={"planner": MagicMock(), "planner_judge": planner_judge})
+
+        phase = PlanReviewPhase()
+        with patch("src.core.phases.plan_review.write_plan_review_report"):
+            outcome = await phase.execute(state, ctx)
+
+        assert outcome.target_status == SystemStatus.AUTO_MERGING
+        assert outcome.reason == "plan approved, no human decisions needed"
+        assert outcome.should_checkpoint
+
+    @pytest.mark.asyncio
+    async def test_approved_with_human_required_awaits(self):
+        """When plan is approved but has HUMAN_REQUIRED files, go to AWAITING_HUMAN."""
+        from src.models.plan_judge import PlanJudgeResult, PlanJudgeVerdict
+        from src.models.plan import PhaseFileBatch
+        from src.models.diff import RiskLevel
+
+        verdict = PlanJudgeVerdict(
+            result=PlanJudgeResult.APPROVED,
+            issues=[],
+            approved_files_count=1,
+            flagged_files_count=1,
+            summary="One file needs human review",
+            judge_model="gpt-4o",
+            timestamp=datetime.now(),
+        )
+        planner_judge = MagicMock()
+        planner_judge.review_plan = AsyncMock(return_value=verdict)
+
+        state = _make_state(status=SystemStatus.PLAN_REVIEWING)
+        plan = _make_plan()
+        plan.phases.append(
+            PhaseFileBatch(
+                batch_id="b_human",
+                phase=MergePhase.CONFLICT_ANALYSIS,
+                file_paths=["sensitive.py"],
+                risk_level=RiskLevel.HUMAN_REQUIRED,
+            )
+        )
+        state.merge_plan = plan
 
         ctx = _make_ctx(agents={"planner": MagicMock(), "planner_judge": planner_judge})
 
@@ -163,7 +205,7 @@ class TestPlanReviewPhase:
             outcome = await phase.execute(state, ctx)
 
         assert outcome.target_status == SystemStatus.AWAITING_HUMAN
-        assert outcome.reason == "plan approved by judge"
+        assert outcome.reason == "plan approved by both agents"
         assert outcome.should_checkpoint
 
     @pytest.mark.asyncio

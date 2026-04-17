@@ -242,6 +242,7 @@ class BaseAgent(ABC):
         system: str | None = None,
         schema: type[BaseModel] | None = None,
         max_retries: int | None = None,
+        json_mode: bool = False,
     ) -> str | BaseModel:
         if self._consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
             self.logger.error(
@@ -312,7 +313,12 @@ class BaseAgent(ABC):
                         messages, schema, system=system
                     )
                 else:
-                    llm_result = await self.llm.complete(messages, system=system)
+                    extra: dict[str, Any] = {}
+                    if json_mode and self.llm_config.provider == "openai":
+                        extra["response_format"] = {"type": "json_object"}
+                    llm_result = await self.llm.complete(
+                        messages, system=system, **extra
+                    )
                 elapsed = time.monotonic() - t0
                 resp_str = str(llm_result)
                 resp_len = len(resp_str)

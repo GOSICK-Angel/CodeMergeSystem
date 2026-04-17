@@ -16,6 +16,8 @@ from src.models.diff import FileDiff, FileChangeCategory, RiskLevel
 from src.models.dispute import PlanDisputeRequest
 from src.models.plan import MergePhase
 from src.models.state import MergeState, PhaseResult, SystemStatus
+from src.tools.commit_replayer import CommitReplayer
+from src.tools.git_committer import GitCommitter
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +39,29 @@ class AutoMergePhase(Phase):
 
         executor = ctx.agents["executor"]
         file_diffs_map: dict[str, FileDiff] = {}
-        for fd in getattr(state, "_file_diffs", None) or []:
+        for fd in state.file_diffs:
             file_diffs_map[fd.file_path] = fd
 
+        replayed_set: set[str] = set()
+        if ctx.config.history.enabled and ctx.config.history.cherry_pick_clean:
+            replayable = state.replayable_commits
+            if replayable:
+                replayer = CommitReplayer()
+                ctx.notify(
+                    "executor", f"Cherry-picking {len(replayable)} clean commits"
+                )
+                replay_result = await replayer.replay_clean_commits(
+                    ctx.git_tool, replayable, state
+                )
+                replayed_set = set(replay_result.replayed_files)
+                logger.info(
+                    "Replay: %d commits cherry-picked, %d failed",
+                    len(replay_result.replayed_shas),
+                    len(replay_result.failed_shas),
+                )
+
         batch_count = 0
+        phase_changed_files: list[str] = []
         completed_layers: set[int] = set()
         layer_index = build_layer_index(state)
 
@@ -59,6 +80,9 @@ class AutoMergePhase(Phase):
                     continue
 
             for file_path in batch.file_paths:
+                if file_path in replayed_set:
+                    continue
+
                 category = batch.change_category
                 if category is None:
                     fd = file_diffs_map.get(file_path)
@@ -67,6 +91,7 @@ class AutoMergePhase(Phase):
                 if category == FileChangeCategory.D_MISSING:
                     record = await executor._copy_from_upstream(file_path, state)
                     state.file_decision_records[file_path] = record
+                    phase_changed_files.append(file_path)
                     batch_count += 1
                     continue
 
@@ -79,6 +104,7 @@ class AutoMergePhase(Phase):
                 )
                 record = await executor.execute_auto_merge(fd, strategy, state)
                 state.file_decision_records[file_path] = record
+                phase_changed_files.append(file_path)
                 batch_count += 1
 
                 if batch_count % 10 == 0:
@@ -112,6 +138,20 @@ class AutoMergePhase(Phase):
                     memory_phase="auto_merge",
                 )
 
+        commit_sha: str | None = None
+        if (
+            ctx.config.history.enabled
+            and ctx.config.history.commit_after_phase
+            and phase_changed_files
+        ):
+            committer = GitCommitter()
+            commit_sha = committer.commit_phase_changes(
+                ctx.git_tool,
+                state,
+                "auto_merge",
+                phase_changed_files,
+            )
+
         has_risky = any(
             batch.risk_level in (RiskLevel.HUMAN_REQUIRED, RiskLevel.AUTO_RISKY)
             for batch in state.merge_plan.phases
@@ -122,7 +162,9 @@ class AutoMergePhase(Phase):
         )
         state.phase_results[MergePhase.AUTO_MERGE.value] = phase_result
 
-        append_execution_record(state, "auto_merge", phase_result, batch_count)
+        append_execution_record(
+            state, "auto_merge", phase_result, batch_count, commit_sha=commit_sha
+        )
 
         if state.plan_disputes:
             ctx.state_machine.transition(
@@ -183,7 +225,7 @@ class AutoMergePhase(Phase):
             revised_plan = await planner.handle_dispute(state, dispute)
             state.merge_plan = revised_plan
 
-            file_diffs: list[FileDiff] = getattr(state, "_file_diffs", []) or []
+            file_diffs: list[FileDiff] = state.file_diffs
             ctx.state_machine.transition(
                 state, SystemStatus.PLAN_REVIEWING, "dispute revision complete"
             )

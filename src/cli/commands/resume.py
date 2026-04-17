@@ -2,6 +2,7 @@ import asyncio
 import sys
 from pathlib import Path
 from rich.console import Console
+from src.cli.paths import get_run_dir, is_dev_mode
 from src.models.state import MergeState, SystemStatus
 from src.core.checkpoint import Checkpoint
 from src.core.orchestrator import Orchestrator
@@ -20,15 +21,22 @@ def resume_command_impl(
         if not cp_path.exists():
             console.print(f"[red]Checkpoint not found: {checkpoint_path}[/red]")
             sys.exit(1)
-        checkpoint = Checkpoint("./outputs/debug")
+        checkpoint = Checkpoint(cp_path.parent)
         state = checkpoint.load(cp_path)
     elif run_id:
-        checkpoint = Checkpoint("./outputs/debug")
-        latest = checkpoint.get_latest(run_id)
+        # Production: .merge/runs/<run_id>/checkpoint.json
+        # Dev mode: ./outputs/debug/checkpoints/checkpoint.json
+        run_dir = get_run_dir(run_id=run_id)
+        checkpoint = Checkpoint(run_dir)
+        latest = checkpoint.get_latest()
         if latest is None:
             console.print(f"[red]No checkpoint found for run_id: {run_id}[/red]")
             sys.exit(1)
         state = checkpoint.load(latest)
+        if state.run_id != run_id and is_dev_mode():
+            console.print(
+                f"[yellow]Warning: checkpoint run_id {state.run_id} != requested {run_id}[/yellow]"
+            )
     else:
         console.print("[red]Either --run-id or --checkpoint is required[/red]")
         sys.exit(1)
@@ -77,8 +85,8 @@ def resume_command_impl(
                 sm = StateMachine()
                 sm.transition(
                     state,
-                    SystemStatus.JUDGE_REVIEWING,
-                    "all human decisions collected from file",
+                    SystemStatus.AWAITING_HUMAN,
+                    "all human decisions collected from file — will execute on next run",
                 )
 
     orchestrator = Orchestrator(state.config)
