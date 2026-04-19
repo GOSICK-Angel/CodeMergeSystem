@@ -13,7 +13,7 @@ from src.models.config import MergeConfig, ThresholdConfig
 from src.models.conflict import ConflictAnalysis, ConflictType
 from src.models.decision import MergeDecision
 from src.models.diff import FileDiff, FileChangeCategory, FileStatus, RiskLevel
-from src.models.judge import JudgeVerdict, VerdictType
+from src.models.judge import ExecutorRebuttal, JudgeVerdict, VerdictType
 from src.models.message import AgentMessage, AgentType, MessageType
 from src.models.plan import MergePlan, MergePhase, PhaseFileBatch, RiskSummary
 from src.models.plan_judge import PlanJudgeResult, PlanJudgeVerdict
@@ -1095,13 +1095,20 @@ class TestPhaseClasses:
 
     async def test_auto_merge_no_risky_skips_to_judge(self, tmp_path):
         from src.core.phases.auto_merge import AutoMergePhase
+        from src.models.judge import BatchVerdict
 
         config = _make_config(str(tmp_path))
         mock_executor = MagicMock()
         mock_executor.execute_auto_merge = AsyncMock(
             return_value=MagicMock(file_path="src/foo.py")
         )
-        ctx = self._make_ctx(config, agents={"executor": mock_executor})
+        mock_judge = MagicMock()
+        mock_judge.review_batch = AsyncMock(
+            return_value=BatchVerdict(approved=True, reviewed_files=["src/foo.py"])
+        )
+        ctx = self._make_ctx(
+            config, agents={"executor": mock_executor, "judge": mock_judge}
+        )
 
         state = _make_state(config)
         state.status = SystemStatus.AUTO_MERGING
@@ -1116,7 +1123,9 @@ class TestPhaseClasses:
         from src.core.phases.auto_merge import AutoMergePhase
 
         config = _make_config(str(tmp_path))
-        ctx = self._make_ctx(config, agents={"executor": MagicMock()})
+        ctx = self._make_ctx(
+            config, agents={"executor": MagicMock(), "judge": MagicMock()}
+        )
 
         state = _make_state(config)
         state.status = SystemStatus.AUTO_MERGING
@@ -1237,8 +1246,12 @@ class TestPhaseClasses:
         mock_judge.run = AsyncMock(return_value=msg)
         mock_judge.verify_customizations = MagicMock(return_value=[])
         mock_judge.build_repair_instructions = MagicMock(return_value=[])
+        mock_executor = MagicMock()
+        mock_executor.build_rebuttal = AsyncMock(
+            return_value=ExecutorRebuttal(accepts_all=True, repair_instructions=[])
+        )
         ctx = self._make_ctx(
-            config, agents={"judge": mock_judge, "executor": MagicMock()}
+            config, agents={"judge": mock_judge, "executor": mock_executor}
         )
 
         state = _make_state(config)
@@ -1273,8 +1286,12 @@ class TestPhaseClasses:
         mock_judge.run = AsyncMock(return_value=msg)
         mock_judge.verify_customizations = MagicMock(return_value=[])
         mock_judge.build_repair_instructions = MagicMock(return_value=[])
+        mock_executor = MagicMock()
+        mock_executor.build_rebuttal = AsyncMock(
+            return_value=ExecutorRebuttal(accepts_all=True, repair_instructions=[])
+        )
         ctx = self._make_ctx(
-            config, agents={"judge": mock_judge, "executor": MagicMock()}
+            config, agents={"judge": mock_judge, "executor": mock_executor}
         )
 
         state = _make_state(config)
@@ -1408,12 +1425,18 @@ class TestPhaseClasses:
     ):
         from src.core.phases.auto_merge import AutoMergePhase
 
+        from src.models.judge import BatchVerdict as BV
+
         config = _make_config(str(tmp_path))
         mock_executor = MagicMock()
         mock_executor.execute_auto_merge = AsyncMock(
             return_value=MagicMock(file_path="src/safe.py")
         )
-        ctx = self._make_ctx(config, agents={"executor": mock_executor})
+        mock_judge = MagicMock()
+        mock_judge.review_batch = AsyncMock(return_value=BV(approved=True))
+        ctx = self._make_ctx(
+            config, agents={"executor": mock_executor, "judge": mock_judge}
+        )
 
         state = _make_state(config)
         state.status = SystemStatus.AUTO_MERGING

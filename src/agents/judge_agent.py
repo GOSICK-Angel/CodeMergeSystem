@@ -8,6 +8,9 @@ from src.models.plan import MergePhase
 from src.models.diff import FileDiff, RiskLevel
 from src.models.decision import FileDecisionRecord
 from src.models.judge import (
+    BatchVerdict,
+    DisputePoint,
+    ExecutorRebuttal,
     JudgeVerdict,
     JudgeIssue,
     RepairInstruction,
@@ -865,6 +868,119 @@ class JudgeAgent(BaseAgent):
                 )
             )
         return instructions
+
+    async def review_batch(
+        self,
+        layer_id: int | None,
+        file_paths: list[str],
+        state: ReadOnlyStateView,
+    ) -> "BatchVerdict":
+        from src.models.judge import BatchVerdict
+
+        file_diffs_map = {fd.file_path: fd for fd in state.file_diffs}
+        all_issues: list[JudgeIssue] = []
+
+        for file_path in file_paths:
+            fd = file_diffs_map.get(file_path)
+            record = state.file_decision_records.get(file_path)
+            if fd is None or record is None:
+                continue
+
+            merged_content = ""
+            if self.git_tool is not None:
+                abs_path = self.git_tool.repo_path / file_path
+                if abs_path.exists():
+                    try:
+                        merged_content = abs_path.read_text(encoding="utf-8")
+                    except OSError:
+                        pass
+
+            issues = await self.review_file(
+                file_path,
+                merged_content,
+                record,
+                fd,
+                project_context=state.config.project_context,
+            )
+            all_issues.extend(issues)
+
+        blocking = [i for i in all_issues if i.must_fix_before_merge]
+        approved = len(blocking) == 0
+        repair_instructions = (
+            self.build_repair_instructions(all_issues) if not approved else []
+        )
+
+        return BatchVerdict(
+            layer_id=layer_id,
+            approved=approved,
+            needs_repair=not approved
+            and any(r.is_repairable for r in repair_instructions),
+            issues=all_issues,
+            repair_instructions=repair_instructions,
+            reviewed_files=list(file_paths),
+        )
+
+    async def re_evaluate(
+        self,
+        rebuttal: "ExecutorRebuttal",
+        current_verdict: "BatchVerdict",
+        state: ReadOnlyStateView,
+    ) -> "BatchVerdict":
+        from src.models.judge import BatchVerdict
+        from src.llm.prompts.judge_prompts import build_re_evaluate_prompt
+        import json as _json
+
+        issues_summary = "\n".join(
+            f"- [{i.issue_id}] {i.issue_level.value}: {i.description}"
+            for i in current_verdict.issues
+        )
+        rebuttal_summary = (
+            rebuttal.overall_rationale
+            + "\n"
+            + "\n".join(
+                f"- issue {dp.issue_id}: {'DISPUTE' if not dp.accepts else 'ACCEPT'} "
+                f"— {dp.counter_evidence}"
+                for dp in rebuttal.dispute_points
+            )
+        )
+        prompt = build_re_evaluate_prompt(rebuttal_summary, issues_summary)
+
+        try:
+            raw = await self._call_llm_with_retry(
+                [{"role": "user", "content": prompt}], system=JUDGE_SYSTEM
+            )
+            raw_str = str(raw).strip()
+            if raw_str.startswith("```"):
+                lines = raw_str.splitlines()
+                raw_str = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+            data = _json.loads(raw_str)
+        except Exception as exc:
+            self.logger.warning("re_evaluate LLM failed: %s", exc)
+            return current_verdict
+
+        issue_map = {i.issue_id: i for i in current_verdict.issues}
+        remaining_issues: list[JudgeIssue] = []
+        for entry in data.get("remaining_issues", []):
+            issue_id = entry.get("issue_id", "")
+            status = entry.get("status", "maintained")
+            if status == "maintained" and issue_id in issue_map:
+                remaining_issues.append(issue_map[issue_id])
+
+        approved: bool = bool(data.get("overall_approved", len(remaining_issues) == 0))
+        repair_instructions = (
+            self.build_repair_instructions(remaining_issues) if not approved else []
+        )
+
+        return BatchVerdict(
+            layer_id=current_verdict.layer_id,
+            approved=approved,
+            needs_repair=not approved
+            and any(r.is_repairable for r in repair_instructions),
+            issues=remaining_issues,
+            repair_instructions=repair_instructions,
+            reviewed_files=current_verdict.reviewed_files,
+            round_num=current_verdict.round_num + 1,
+        )
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus

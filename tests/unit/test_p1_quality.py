@@ -17,6 +17,7 @@ from src.models.config import (
 from src.models.diff import FileChangeCategory, FileDiff, FileStatus, RiskLevel
 from src.models.judge import (
     CustomizationViolation,
+    ExecutorRebuttal,
     IssueSeverity,
     JudgeIssue,
     JudgeVerdict,
@@ -664,6 +665,18 @@ class TestRepairLoopOrchestration:
         )
         mock_executor = MagicMock()
         mock_executor.repair = AsyncMock(return_value=[])
+        mock_executor.build_rebuttal = AsyncMock(
+            return_value=ExecutorRebuttal(
+                accepts_all=True,
+                repair_instructions=[
+                    RepairInstruction(
+                        file_path="a.py",
+                        instruction="fix syntax",
+                        is_repairable=True,
+                    )
+                ],
+            )
+        )
 
         ctx = self._make_ctx(
             config, agents={"judge": mock_judge, "executor": mock_executor}
@@ -733,8 +746,12 @@ class TestRepairLoopOrchestration:
         mock_judge.verify_customizations = MagicMock(return_value=[violation])
         mock_judge.build_repair_instructions = MagicMock(return_value=[])
 
+        mock_executor = MagicMock()
+        mock_executor.build_rebuttal = AsyncMock(
+            return_value=ExecutorRebuttal(accepts_all=True, repair_instructions=[])
+        )
         ctx = self._make_ctx(
-            config, agents={"judge": mock_judge, "executor": MagicMock()}
+            config, agents={"judge": mock_judge, "executor": mock_executor}
         )
 
         state = MergeState(config=config)

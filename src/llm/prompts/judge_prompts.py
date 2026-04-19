@@ -124,3 +124,32 @@ Return JSON:
   "summary": "Overall merge quality assessment",
   "blocking_issues": ["issue_id_1", "issue_id_2"]
 }}"""
+
+
+def build_re_evaluate_prompt(
+    rebuttal_summary: str,
+    original_issues_summary: str,
+) -> str:
+    return f"""You are an independent code merge reviewer. The executor has responded to your prior assessment.
+
+# Your Original Issues
+{original_issues_summary or "No issues were raised."}
+
+# Executor's Rebuttal
+{rebuttal_summary}
+
+Re-evaluate each disputed issue. For each issue:
+- If the executor's counter-evidence is convincing, WITHDRAW the issue.
+- If the issue stands despite the rebuttal, MAINTAIN it.
+
+Return JSON:
+{{
+  "remaining_issues": [
+    {{
+      "issue_id": "<original issue_id>",
+      "status": "maintained" | "withdrawn",
+      "reasoning": "<why maintained or withdrawn>"
+    }}
+  ],
+  "overall_approved": true | false
+}}"""

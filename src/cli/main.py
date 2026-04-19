@@ -5,8 +5,6 @@ import click
 from pathlib import Path
 from rich.console import Console
 from src.models.config import MergeConfig
-from src.core.checkpoint import Checkpoint
-from src.tools.report_writer import write_markdown_report, write_json_report
 from src.cli.env import load_env
 
 
@@ -17,7 +15,7 @@ class _DefaultGroup(click.Group):
     """Forwards unrecognised first arguments to the 'merge' subcommand.
 
     Lets users type `merge upstream/main` without the explicit 'merge'
-    token while keeping all named subcommands (run, resume, …) unchanged.
+    token while keeping all named subcommands (resume, validate, …) unchanged.
     """
 
     def resolve_command(
@@ -70,58 +68,6 @@ def merge_command(
     run_command_impl(config, dry_run, ci=ci)
 
 
-@cli.command("run")
-@click.option("--config", "-c", required=True, type=click.Path(exists=True))
-@click.option("--dry-run", is_flag=True, help="Analyze only, do not merge")
-@click.option(
-    "--export-decisions",
-    default=None,
-    type=click.Path(),
-    help="Export decision template when awaiting human review",
-)
-@click.option(
-    "--ci",
-    is_flag=True,
-    help="CI mode: no interaction, standard exit codes, JSON summary to stdout",
-)
-@click.option(
-    "--github-pr",
-    default=None,
-    type=int,
-    help="GitHub PR number for review comment integration",
-)
-@click.option(
-    "--no-tui",
-    is_flag=True,
-    help="Disable interactive TUI, use plain text output",
-)
-@click.option(
-    "--ws-port",
-    default=8765,
-    type=int,
-    help="WebSocket port for TUI bridge (default: 8765)",
-)
-def run_command(
-    config: str,
-    dry_run: bool,
-    export_decisions: str | None,
-    ci: bool,
-    github_pr: int | None,
-    no_tui: bool,
-    ws_port: int,
-) -> None:
-    """Execute complete merge workflow"""
-    if not ci and not no_tui:
-        from src.cli.commands.tui import tui_command_impl
-
-        tui_command_impl(config, ws_port, dry_run)
-        return
-
-    from src.cli.commands.run import run_command_impl
-
-    run_command_impl(config, dry_run, export_decisions, ci=ci, github_pr=github_pr)
-
-
 @cli.command("resume")
 @click.option("--run-id", required=False, default=None)
 @click.option(
@@ -140,46 +86,6 @@ def resume_command(
     from src.cli.commands.resume import resume_command_impl
 
     resume_command_impl(run_id, checkpoint, decisions)
-
-
-@cli.command("report")
-@click.option("--run-id", required=True)
-@click.option("--output", "-o", default="./outputs")
-def report_command(run_id: str, output: str) -> None:
-    """Generate reports only (without executing merge)"""
-    from src.cli.paths import get_run_dir
-
-    checkpoint_manager = Checkpoint(get_run_dir(run_id=run_id))
-    latest = checkpoint_manager.get_latest()
-    if latest is None:
-        console.print(f"[red]No checkpoint found for run_id: {run_id}[/red]")
-        sys.exit(1)
-
-    state = checkpoint_manager.load(latest)
-
-    try:
-        json_path = write_json_report(state, output)
-        console.print(f"JSON report: {json_path}")
-    except Exception as e:
-        console.print(f"[red]JSON report failed: {e}[/red]")
-
-    try:
-        md_path = write_markdown_report(state, output)
-        console.print(f"Markdown report: {md_path}")
-    except Exception as e:
-        console.print(f"[red]Markdown report failed: {e}[/red]")
-
-
-@cli.command("init")
-def init_command() -> None:
-    """Interactive setup wizard for config and API keys (deprecated: use `merge <branch>`)"""
-    console.print(
-        "[yellow]Deprecated:[/yellow] `merge init` is deprecated. "
-        "Use `merge <target-branch>` for guided setup."
-    )
-    from src.cli.commands.init import init_command_impl
-
-    init_command_impl()
 
 
 @cli.command("validate")
@@ -234,50 +140,6 @@ def validate_config_and_env(config: MergeConfig) -> list[str]:
             errors.append(f"Git ref '{ref}' does not exist in repository")
 
     return errors
-
-
-@cli.command("ui")
-@click.option("--run-id", required=False, default=None)
-@click.option(
-    "--checkpoint", required=False, type=click.Path(exists=True), default=None
-)
-@click.option("--port", default=8080, type=int, help="Server port")
-@click.option("--host", default="localhost", help="Server host")
-def ui_command(
-    run_id: str | None, checkpoint: str | None, port: int, host: str
-) -> None:
-    """Start web UI for merge decisions"""
-    from src.core.checkpoint import Checkpoint
-    from src.cli.paths import get_run_dir
-
-    if checkpoint:
-        cp = Checkpoint(Path(checkpoint).parent)
-        state = cp.load(Path(checkpoint))
-    elif run_id:
-        cp = Checkpoint(get_run_dir(run_id=run_id))
-        latest = cp.get_latest()
-        if latest is None:
-            console.print(f"[red]No checkpoint found for run_id: {run_id}[/red]")
-            sys.exit(1)
-        state = cp.load(latest)
-    else:
-        console.print("[red]Either --run-id or --checkpoint is required[/red]")
-        sys.exit(1)
-
-    from src.web.server import start_server
-
-    start_server(state, host, port)
-
-
-@cli.command("tui")
-@click.option("--config", "-c", required=True, type=click.Path(exists=True))
-@click.option("--ws-port", default=8765, type=int, help="WebSocket port for TUI bridge")
-@click.option("--dry-run", is_flag=True, help="Analyze only, do not merge")
-def tui_command(config: str, ws_port: int, dry_run: bool) -> None:
-    """Launch interactive terminal UI for merge workflow"""
-    from src.cli.commands.tui import tui_command_impl
-
-    tui_command_impl(config, ws_port, dry_run)
 
 
 if __name__ == "__main__":

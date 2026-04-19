@@ -1,4 +1,9 @@
+from __future__ import annotations
+
+import json
+import logging
 from datetime import datetime
+
 from src.agents.base_agent import BaseAgent
 from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage, MessageType
@@ -6,17 +11,27 @@ from src.models.plan import MergePhase
 from src.models.diff import FileDiff, FileChangeCategory, RiskLevel, FileStatus
 from src.models.conflict import ConflictAnalysis
 from src.models.decision import MergeDecision, FileDecisionRecord, DecisionSource
-from src.models.judge import RepairInstruction
+from src.models.judge import (
+    RepairInstruction,
+    JudgeIssue,
+    ExecutorRebuttal,
+    DisputePoint,
+)
 from src.models.human import HumanDecisionRequest
 from src.models.dispute import PlanDisputeRequest
+from src.models.plan_review import UserDecisionItem, DecisionOption
 from src.models.state import MergeState
 from src.llm.prompts.executor_prompts import (
     EXECUTOR_SYSTEM,
     build_semantic_merge_prompt,
+    build_deletion_analysis_prompt,
+    build_rebuttal_prompt,
 )
 from src.llm.response_parser import parse_merge_result
 from src.tools.patch_applier import apply_with_snapshot, create_escalate_record
 from src.tools.git_tool import GitTool
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutorAgent(BaseAgent):
@@ -51,7 +66,7 @@ class ExecutorAgent(BaseAgent):
         )
 
         for batch in state.merge_plan.phases:
-            if batch.risk_level not in (RiskLevel.AUTO_SAFE, RiskLevel.DELETED_ONLY):
+            if batch.risk_level not in (RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY):
                 continue
 
             for file_path in batch.file_paths:
@@ -148,8 +163,6 @@ class ExecutorAgent(BaseAgent):
             if risk_level == RiskLevel.AUTO_RISKY:
                 return MergeDecision.SEMANTIC_MERGE
             return MergeDecision.TAKE_TARGET
-        if risk_level == RiskLevel.DELETED_ONLY:
-            return MergeDecision.SKIP
         return MergeDecision.TAKE_TARGET
 
     async def _copy_from_upstream(
@@ -509,6 +522,122 @@ class ExecutorAgent(BaseAgent):
 
         state.plan_disputes.append(dispute)
         return dispute
+
+    async def analyze_deletion(
+        self,
+        file_path: str,
+        file_diff: FileDiff,
+        state: MergeState,
+    ) -> UserDecisionItem:
+        prompt = build_deletion_analysis_prompt(
+            file_path,
+            file_diff.lines_deleted,
+            state.config.project_context,
+        )
+        rationale = "File deleted in upstream branch."
+        try:
+            raw = await self._call_llm_with_retry(
+                [{"role": "user", "content": prompt}], system=EXECUTOR_SYSTEM
+            )
+            rationale = str(raw).strip()
+        except Exception as exc:
+            logger.warning("analyze_deletion LLM failed for %s: %s", file_path, exc)
+
+        return UserDecisionItem(
+            item_id=f"deleted_only_{file_path}",
+            file_path=file_path,
+            description=f"File '{file_path}' is deleted in upstream.",
+            risk_context=rationale,
+            current_classification=RiskLevel.DELETED_ONLY.value,
+            options=[
+                DecisionOption(
+                    key="A",
+                    label="confirm_delete",
+                    description="Apply deletion (remove this file)",
+                ),
+                DecisionOption(
+                    key="B",
+                    label="keep",
+                    description="Keep file (do not apply upstream deletion)",
+                ),
+            ],
+        )
+
+    async def build_rebuttal(
+        self,
+        issues: list[JudgeIssue],
+        state: MergeState,
+    ) -> ExecutorRebuttal:
+        if not issues:
+            return ExecutorRebuttal(accepts_all=True)
+
+        issues_summary = "\n".join(
+            f"- [{i.issue_id}] {i.issue_level.value}: {i.description}" for i in issues
+        )
+        file_paths = list({i.file_path for i in issues})
+        prompt = build_rebuttal_prompt(
+            issues_summary, file_paths, state.config.project_context
+        )
+        try:
+            raw = await self._call_llm_with_retry(
+                [{"role": "user", "content": prompt}], system=EXECUTOR_SYSTEM
+            )
+            raw_str = str(raw).strip()
+            if raw_str.startswith("```"):
+                lines = raw_str.splitlines()
+                raw_str = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+            data = json.loads(raw_str)
+        except Exception as exc:
+            logger.warning("build_rebuttal LLM failed: %s", exc)
+            return ExecutorRebuttal(
+                accepts_all=True,
+                repair_instructions=[
+                    RepairInstruction(
+                        file_path=i.file_path,
+                        instruction=i.description,
+                        severity=i.issue_level,
+                        is_repairable=True,
+                    )
+                    for i in issues
+                    if i.must_fix_before_merge
+                ],
+                overall_rationale="Rebuttal analysis failed; accepting all issues for repair.",
+            )
+
+        accepts_all: bool = bool(data.get("accepts_all", False))
+        dispute_points: list[DisputePoint] = []
+        repair_instructions: list[RepairInstruction] = []
+        issue_map = {i.issue_id: i for i in issues}
+
+        for decision in data.get("decisions", []):
+            issue_id = decision.get("issue_id", "")
+            action = decision.get("action", "accept")
+            evidence = decision.get("counter_evidence", "")
+            if action == "dispute":
+                dispute_points.append(
+                    DisputePoint(
+                        issue_id=issue_id, counter_evidence=evidence, accepts=False
+                    )
+                )
+            else:
+                original = issue_map.get(issue_id)
+                if original and original.must_fix_before_merge:
+                    repair_instructions.append(
+                        RepairInstruction(
+                            file_path=original.file_path,
+                            instruction=original.description,
+                            severity=original.issue_level,
+                            is_repairable=True,
+                            source_issue_id=issue_id,
+                        )
+                    )
+
+        return ExecutorRebuttal(
+            accepts_all=accepts_all or not dispute_points,
+            dispute_points=dispute_points,
+            repair_instructions=repair_instructions,
+            overall_rationale=data.get("overall_rationale", ""),
+        )
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus

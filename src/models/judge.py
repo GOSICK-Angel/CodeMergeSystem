@@ -100,3 +100,26 @@ class JudgeVerdict(BaseModel):
     veto_reason: str | None = None
     repair_instructions: list[RepairInstruction] = Field(default_factory=list)
     customization_violations: list[CustomizationViolation] = Field(default_factory=list)
+
+
+class BatchVerdict(BaseModel):
+    layer_id: int | None = None
+    approved: bool
+    needs_repair: bool = False
+    issues: list[JudgeIssue] = Field(default_factory=list)
+    repair_instructions: list[RepairInstruction] = Field(default_factory=list)
+    reviewed_files: list[str] = Field(default_factory=list)
+    round_num: int = 0
+
+
+class DisputePoint(BaseModel):
+    issue_id: str
+    counter_evidence: str
+    accepts: bool = False
+
+
+class ExecutorRebuttal(BaseModel):
+    accepts_all: bool
+    dispute_points: list[DisputePoint] = Field(default_factory=list)
+    repair_instructions: list[RepairInstruction] = Field(default_factory=list)
+    overall_rationale: str = ""

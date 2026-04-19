@@ -503,6 +503,9 @@ class TestExecutorCategoryDispatch:
         assert strategy == MergeDecision.SKIP
 
     def test_select_strategy_none_fallback(self):
+        # DELETED_ONLY is no longer handled in _select_strategy_by_category;
+        # it is routed to analyze_deletion() in AutoMergePhase pre-pass.
+        # Passing DELETED_ONLY risk_level with no category falls through to TAKE_TARGET.
         from src.agents.executor_agent import ExecutorAgent
         from src.models.config import AgentLLMConfig
         from src.models.decision import MergeDecision
@@ -510,7 +513,7 @@ class TestExecutorCategoryDispatch:
         with patch("src.llm.client.LLMClientFactory.create"):
             executor = ExecutorAgent(AgentLLMConfig())
         strategy = executor._select_strategy_by_category(None, RiskLevel.DELETED_ONLY)
-        assert strategy == MergeDecision.SKIP
+        assert strategy == MergeDecision.TAKE_TARGET
 
 
 class TestTopologicalSortLayers:

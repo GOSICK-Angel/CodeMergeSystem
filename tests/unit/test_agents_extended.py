@@ -407,7 +407,9 @@ class TestExecutorAgent:
 
         assert result.payload["processed"] == 0
 
-    def test_run_processes_deleted_only_with_skip_strategy(self):
+    def test_run_skips_deleted_only_batch(self):
+        # DELETED_ONLY batches are now handled in AutoMergePhase pre-pass
+        # (via executor.analyze_deletion), not in executor.run()
         state = _make_state()
         fd = _make_file_diff("old.py", RiskLevel.DELETED_ONLY, FileStatus.DELETED)
         state.file_diffs = [fd]
@@ -420,23 +422,16 @@ class TestExecutorAgent:
         )
         state.merge_plan = _make_merge_plan([batch])
 
-        mock_record = FileDecisionRecord(
-            file_path="old.py",
-            file_status=FileStatus.DELETED,
-            decision=MergeDecision.SKIP,
-            decision_source=DecisionSource.AUTO_PLANNER,
-            rationale="skipped",
-        )
-
         import asyncio
 
         with patch.object(
-            self.agent, "execute_auto_merge", new=AsyncMock(return_value=mock_record)
+            self.agent, "execute_auto_merge", new=AsyncMock()
         ) as mock_exec:
-            asyncio.get_event_loop().run_until_complete(self.agent.run(state))
+            result = asyncio.get_event_loop().run_until_complete(self.agent.run(state))
 
-        call_args = mock_exec.call_args
-        assert call_args[0][1] == MergeDecision.SKIP
+        # DELETED_ONLY is not AUTO_SAFE/AUTO_RISKY → executor.run() skips it
+        mock_exec.assert_not_called()
+        assert result.payload["processed"] == 0
 
     def test_execute_auto_merge_returns_escalate_when_no_git_tool(self):
         self.agent.git_tool = None

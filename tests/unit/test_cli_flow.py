@@ -253,15 +253,6 @@ class TestDefaultGroup:
         from src.cli.main import cli
 
         runner = CliRunner()
-        result = runner.invoke(cli, ["run", "--help"])
+        result = runner.invoke(cli, ["resume", "--help"])
         assert result.exit_code == 0
-        assert "--config" in result.output
-
-    def test_init_shows_deprecation_warning(self) -> None:
-        from src.cli.main import cli
-
-        runner = CliRunner()
-        with patch("src.cli.commands.init.init_command_impl"):
-            result = runner.invoke(cli, ["init"])
-
-        assert "deprecated" in result.output.lower()
+        assert "--run-id" in result.output

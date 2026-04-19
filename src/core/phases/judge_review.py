@@ -35,7 +35,7 @@ class JudgeReviewPhase(Phase):
 
         judge = ctx.agents["judge"]
         executor = ctx.agents["executor"]
-        max_rounds = ctx.config.max_judge_repair_rounds
+        max_rounds = ctx.config.max_dispute_rounds
         state.judge_repair_rounds = 0
 
         for round_num in range(max_rounds):
@@ -91,35 +91,67 @@ class JudgeReviewPhase(Phase):
                 logger.info("Judge PASS on round %d", round_num)
                 break
 
-            if state.judge_verdict.veto_triggered:
-                logger.warning(
-                    "Judge VETO on round %d: %s",
-                    round_num,
-                    state.judge_verdict.veto_reason,
-                )
-                break
-
-            repair_instructions = judge.build_repair_instructions(
-                state.judge_verdict.issues
-            )
-            state.judge_verdict = state.judge_verdict.model_copy(
-                update={"repair_instructions": repair_instructions}
+            # No VETO hard-stop: enter Executor ↔ Judge negotiation
+            logger.info(
+                "Judge non-PASS on round %d (veto=%s): attempting negotiation",
+                round_num,
+                state.judge_verdict.veto_triggered,
             )
 
-            repairable = [r for r in repair_instructions if r.is_repairable]
-            if not repairable:
-                logger.info("No repairable issues on round %d, escalating", round_num)
-                break
+            rebuttal = await executor.build_rebuttal(state.judge_verdict.issues, state)
 
-            if round_num < max_rounds - 1:
+            if rebuttal.accepts_all:
+                repairable = [
+                    r for r in rebuttal.repair_instructions if r.is_repairable
+                ]
+                if repairable and round_num < max_rounds - 1:
+                    logger.info(
+                        "Executor accepts all issues; repairing %d items (round %d/%d)",
+                        len(repairable),
+                        round_num + 1,
+                        max_rounds,
+                    )
+                    await executor.repair(repairable, state)
+                    ctx.checkpoint.save(state, f"phase5_repair_{round_num}")
+                continue
+
+            # Executor disputes some issues — judge re-evaluates
+            from src.models.judge import BatchVerdict as BV
+
+            proxy_verdict = BV(
+                layer_id=None,
+                approved=False,
+                issues=state.judge_verdict.issues,
+                repair_instructions=state.judge_verdict.repair_instructions,
+                reviewed_files=state.judge_verdict.passed_files
+                + state.judge_verdict.failed_files,
+                round_num=round_num,
+            )
+            batch_verdict = await judge.re_evaluate(rebuttal, proxy_verdict, readonly)
+
+            remaining_issues = batch_verdict.issues
+            if batch_verdict.approved:
                 logger.info(
-                    "Repair round %d/%d: %d instructions",
-                    round_num + 1,
-                    max_rounds,
-                    len(repairable),
+                    "Judge accepts rebuttal on round %d — consensus reached", round_num
                 )
-                await executor.repair(repairable, state)
-                ctx.checkpoint.save(state, f"phase5_repair_{round_num}")
+                state.judge_verdict = state.judge_verdict.model_copy(
+                    update={
+                        "verdict": VerdictType.PASS,
+                        "issues": remaining_issues,
+                        "veto_triggered": False,
+                        "veto_reason": None,
+                    }
+                )
+                break
+            else:
+                state.judge_verdict = state.judge_verdict.model_copy(
+                    update={"issues": remaining_issues}
+                )
+                logger.info(
+                    "Judge maintains %d issues after rebuttal on round %d",
+                    len(remaining_issues),
+                    round_num,
+                )
 
         phase_result = phase_result.model_copy(
             update={"status": "completed", "completed_at": datetime.now()}
@@ -150,53 +182,41 @@ class JudgeReviewPhase(Phase):
                 memory_phase="judge_review",
             )
 
-        verdict_type = state.judge_verdict.verdict
-        if verdict_type == VerdictType.PASS:
+        # Final routing: consensus reached (PASS) or escalate to human
+        if state.judge_verdict.verdict == VerdictType.PASS:
             await self._run_smoke_tests(state, ctx)
-            if state.judge_verdict.verdict == VerdictType.FAIL and (
-                state.judge_verdict.veto_triggered
-            ):
-                ctx.state_machine.transition(
-                    state,
-                    SystemStatus.AWAITING_HUMAN,
-                    f"smoke VETO: {state.judge_verdict.veto_reason}",
+            # Smoke tests may downgrade verdict to FAIL
+            if state.judge_verdict.verdict != VerdictType.PASS:
+                reason = (
+                    f"smoke test failed: {state.judge_verdict.veto_reason}"
+                    if state.judge_verdict.veto_reason
+                    else "smoke test failed"
                 )
+                ctx.state_machine.transition(state, SystemStatus.AWAITING_HUMAN, reason)
                 return PhaseOutcome(
                     target_status=SystemStatus.AWAITING_HUMAN,
-                    reason=f"smoke VETO: {state.judge_verdict.veto_reason}",
+                    reason=reason,
                     checkpoint_tag="after_phase5_smoke",
                     memory_phase="judge_review",
                 )
             ctx.state_machine.transition(
                 state, SystemStatus.GENERATING_REPORT, "judge verdict: PASS"
             )
-            target = SystemStatus.GENERATING_REPORT
-            reason = "judge verdict: PASS"
-        elif state.judge_verdict.veto_triggered:
-            ctx.state_machine.transition(
-                state,
-                SystemStatus.AWAITING_HUMAN,
-                f"judge VETO: {state.judge_verdict.veto_reason}",
+            return PhaseOutcome(
+                target_status=SystemStatus.GENERATING_REPORT,
+                reason="judge verdict: PASS",
+                checkpoint_tag="after_phase5",
+                memory_phase="judge_review",
             )
-            target = SystemStatus.AWAITING_HUMAN
-            reason = f"judge VETO: {state.judge_verdict.veto_reason}"
-        elif verdict_type == VerdictType.CONDITIONAL:
-            ctx.state_machine.transition(
-                state, SystemStatus.AWAITING_HUMAN, "judge verdict: CONDITIONAL"
-            )
-            target = SystemStatus.AWAITING_HUMAN
-            reason = "judge verdict: CONDITIONAL"
-        else:
-            ctx.state_machine.transition(
-                state,
-                SystemStatus.AWAITING_HUMAN,
-                f"judge verdict: FAIL after {state.judge_repair_rounds + 1} rounds",
-            )
-            target = SystemStatus.AWAITING_HUMAN
-            reason = f"judge verdict: FAIL after {state.judge_repair_rounds + 1} rounds"
 
+        # No consensus after all dispute rounds → human decision
+        reason = (
+            f"judge verdict: no consensus after {state.judge_repair_rounds + 1} "
+            f"dispute rounds"
+        )
+        ctx.state_machine.transition(state, SystemStatus.AWAITING_HUMAN, reason)
         return PhaseOutcome(
-            target_status=target,
+            target_status=SystemStatus.AWAITING_HUMAN,
             reason=reason,
             checkpoint_tag="after_phase5",
             memory_phase="judge_review",

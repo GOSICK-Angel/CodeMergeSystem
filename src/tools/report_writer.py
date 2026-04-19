@@ -98,6 +98,9 @@ _I18N: dict[str, dict[str, str]] = {
         "calls": "Calls",
         "tokens": "Tokens",
         "cost": "Cost (USD)",
+        "context_utilization": "Context Utilization",
+        "avg_ctx_utilization": "Avg utilization",
+        "peak_ctx_utilization": "Peak utilization",
         "planner_response_hdr": "Planner Responses",
         "response_accept": "Accept",
         "response_reject": "Reject",
@@ -197,6 +200,9 @@ _I18N: dict[str, dict[str, str]] = {
         "calls": "调用次数",
         "tokens": "Token 数",
         "cost": "成本 (USD)",
+        "context_utilization": "Context 利用率",
+        "avg_ctx_utilization": "平均利用率",
+        "peak_ctx_utilization": "峰值利用率",
         "planner_response_hdr": "Planner 逐条回应",
         "response_accept": "接受",
         "response_reject": "拒绝",
@@ -215,8 +221,9 @@ def _t(language: str, key: str) -> str:
 def _build_run_insights_lines(
     t: partial[str],
     cost_summary: dict[str, Any],
+    utilization_summary: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Build the Run Insights markdown section from a CostTracker summary."""
+    """Build the Run Insights markdown section from CostTracker and TraceLogger summaries."""
     if not cost_summary or cost_summary.get("total_calls", 0) == 0:
         return []
 
@@ -258,6 +265,19 @@ def _build_run_insights_lines(
             )
         lines.append("")
 
+    if utilization_summary:
+        lines += [
+            f"### {t('context_utilization')}",
+            "",
+            f"| {t('agent_name')} | {t('avg_ctx_utilization')} | {t('peak_ctx_utilization')} |",
+            "|-------|-------|-------|",
+        ]
+        for agent_name, stats in sorted(utilization_summary.items()):
+            avg = stats.get("avg_utilization", 0.0)
+            peak = stats.get("peak_utilization", 0.0)
+            lines.append(f"| {agent_name} | {avg:.1%} | {peak:.1%} |")
+        lines.append("")
+
     return lines
 
 
@@ -265,6 +285,7 @@ def write_markdown_report(
     state: MergeState,
     output_dir: str,
     cost_summary: dict[str, Any] | None = None,
+    utilization_summary: dict[str, Any] | None = None,
 ) -> Path:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -358,7 +379,7 @@ def write_markdown_report(
         lines.append("")
 
     if cost_summary:
-        lines.extend(_build_run_insights_lines(t, cost_summary))
+        lines.extend(_build_run_insights_lines(t, cost_summary, utilization_summary))
 
     report_path.write_text("\n".join(lines), encoding="utf-8")
     return report_path

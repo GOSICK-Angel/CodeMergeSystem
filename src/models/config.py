@@ -459,6 +459,8 @@ class MergeConfig(BaseModel):
         default_factory=HistoryPreservationConfig
     )
     max_judge_repair_rounds: int = Field(default=3, ge=1, le=10)
+    max_dispute_rounds: int = Field(default=2, ge=1, le=5)
+    max_batch_repair_rounds: int = Field(default=1, ge=1, le=3)
 
     @field_validator("upstream_ref", "fork_ref")
     @classmethod
