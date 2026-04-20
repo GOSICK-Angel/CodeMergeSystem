@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Any
 
 from src.agents.base_agent import CIRCUIT_BREAKER_THRESHOLD
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
@@ -17,6 +18,53 @@ from src.tools.git_committer import GitCommitter
 from src.tools.rule_resolver import RuleBasedResolver
 
 logger = logging.getLogger(__name__)
+
+
+def build_commit_rounds(
+    commits: list[dict[str, Any]],
+    round_size: int,
+) -> list[list[dict[str, Any]]]:
+    rounds: list[list[dict[str, Any]]] = []
+    current_round: list[dict[str, Any]] = []
+    current_files: set[str] = set()
+
+    for commit in commits:
+        commit_files = set(commit.get("files", []))
+        if (commit_files & current_files and current_round) or (
+            len(current_round) >= round_size
+        ):
+            rounds.append(current_round)
+            current_round = []
+            current_files = set()
+        current_round.append(commit)
+        current_files |= commit_files
+
+    if current_round:
+        rounds.append(current_round)
+    return rounds
+
+
+async def _get_round_three_way(
+    round_commits: list[dict[str, Any]],
+    already_resolved: set[str],
+    state: MergeState,
+    ctx: PhaseContext,
+) -> dict[str, tuple[str | None, str | None, str | None]]:
+    result: dict[str, tuple[str | None, str | None, str | None]] = {}
+    for commit in round_commits:
+        for fp in commit.get("files", []):
+            if fp in result or fp in already_resolved:
+                continue
+            base_c = current_c = target_c = None
+            if ctx.git_tool:
+                base_c, current_c, target_c = ctx.git_tool.get_three_way_diff(
+                    state.merge_base_commit,
+                    state.config.fork_ref,
+                    state.config.upstream_ref,
+                    fp,
+                )
+            result[fp] = (base_c, current_c, target_c)
+    return result
 
 
 def _select_merge_strategy(
@@ -115,6 +163,17 @@ class ConflictAnalysisPhase(Phase):
                 if batch.risk_level in (_RL.HUMAN_REQUIRED, _RL.AUTO_RISKY):
                     high_risk_files.extend(batch.file_paths)
 
+        # Include files auto_merge surfaced as unhandled (skipped layers +
+        # non-replayable commits). Dedupe while preserving order.
+        _seen_hr = set(high_risk_files)
+        for fp in state.pending_conflict_files or []:
+            if fp in _seen_hr:
+                continue
+            if fp in state.file_decision_records:
+                continue
+            high_risk_files.append(fp)
+            _seen_hr.add(fp)
+
         rule_resolver = RuleBasedResolver()
         rule_resolved_files: set[str] = set()
         for file_path in high_risk_files:
@@ -159,17 +218,125 @@ class ConflictAnalysisPhase(Phase):
                 len(llm_files),
             )
 
-        total = len(llm_files)
+        # --- Split llm_files into two streams ---
+        # Stream A: files from non_replayable_commits  → commit-round LLM (commit context)
+        # Stream B: plan HUMAN_REQUIRED/AUTO_RISKY + other pending → per-file LLM
+        non_replay_file_to_commit: dict[str, dict] = {}
+        for _commit in state.non_replayable_commits or []:
+            for _fp in _commit.get("files", []):
+                non_replay_file_to_commit.setdefault(_fp, _commit)
+
+        stream_a_shas_seen: set[str] = set()
+        stream_a_commits: list[dict] = []
+        stream_a_files: set[str] = set()
+        stream_b_files: list[str] = []
+
+        for fp in llm_files:
+            if fp in non_replay_file_to_commit:
+                stream_a_files.add(fp)
+                commit_sha = non_replay_file_to_commit[fp]["sha"]
+                if commit_sha not in stream_a_shas_seen:
+                    stream_a_shas_seen.add(commit_sha)
+                    stream_a_commits.append(non_replay_file_to_commit[fp])
+            else:
+                stream_b_files.append(fp)
+
         circuit_breaker_open = False
-        for idx, file_path in enumerate(llm_files, 1):
+
+        # --- Stream A: commit-round analysis ---
+        if stream_a_commits:
+            round_size = ctx.config.commit_round_size
+            rounds = build_commit_rounds(stream_a_commits, round_size)
+            logger.info(
+                "Commit-stream: %d commits → %d rounds (%d files)",
+                len(stream_a_commits),
+                len(rounds),
+                len(stream_a_files),
+            )
+
+            for round_idx, round_commits in enumerate(rounds, 1):
+                if circuit_breaker_open:
+                    for _fp in stream_a_files:
+                        if _fp not in state.conflict_analyses:
+                            state.conflict_analyses[_fp] = ConflictAnalysis(
+                                file_path=_fp,
+                                conflict_points=[],
+                                overall_confidence=0.0,
+                                recommended_strategy=MergeDecision.ESCALATE_HUMAN,
+                                conflict_type=ConflictType.UNKNOWN,
+                                rationale="Circuit breaker open — skipped",
+                                confidence=0.0,
+                            )
+                    break
+
+                ctx.notify(
+                    "conflict_analyst",
+                    f"Commit-stream round {round_idx}/{len(rounds)} "
+                    f"({len(round_commits)} commits)",
+                )
+
+                already_done: set[str] = (
+                    set(state.file_decision_records.keys()) | rule_resolved_files
+                )
+                three_way = await _get_round_three_way(
+                    round_commits, already_done, state, ctx
+                )
+                round_llm_files = {
+                    fp: tw for fp, tw in three_way.items() if fp in stream_a_files
+                }
+                if not round_llm_files:
+                    continue
+
+                file_languages = {
+                    fp: (
+                        file_diffs_map[fp].language or ""
+                        if fp in file_diffs_map
+                        else ""
+                    )
+                    for fp in round_llm_files
+                }
+                analyses = await conflict_analyst.analyze_commit_round(
+                    round_commits,
+                    round_llm_files,
+                    file_languages,
+                    project_context=state.config.project_context,
+                )
+
+                for fp in round_llm_files:
+                    if fp not in analyses:
+                        analyses[fp] = ConflictAnalysis(
+                            file_path=fp,
+                            conflict_points=[],
+                            overall_confidence=0.3,
+                            recommended_strategy=MergeDecision.ESCALATE_HUMAN,
+                            conflict_type=ConflictType.UNKNOWN,
+                            rationale="Commit-round LLM did not return analysis for file",
+                            confidence=0.3,
+                        )
+
+                state.conflict_analyses.update(analyses)
+                ctx.checkpoint.save(state, f"phase3_round_{round_idx}")
+
+                if conflict_analyst.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
+                    circuit_breaker_open = True
+
+                logger.info(
+                    "Round %d/%d done: %d files analyzed",
+                    round_idx,
+                    len(rounds),
+                    len(round_llm_files),
+                )
+
+        # --- Stream B: per-file LLM (plan HUMAN_REQUIRED/AUTO_RISKY, no commit context) ---
+        total_b = len(stream_b_files)
+        for idx, file_path in enumerate(stream_b_files, 1):
             fd = file_diffs_map.get(file_path)  # type: ignore[assignment]
             if fd is None:
                 continue
 
             if circuit_breaker_open:
                 logger.warning(
-                    "Circuit breaker open — skipping LLM analysis for %s, "
-                    "escalating to human",
+                    "Circuit breaker open — skipping %s, escalating to human",
                     file_path,
                 )
                 state.conflict_analyses[file_path] = ConflictAnalysis(
@@ -178,15 +345,14 @@ class ConflictAnalysisPhase(Phase):
                     overall_confidence=0.0,
                     recommended_strategy=MergeDecision.ESCALATE_HUMAN,
                     conflict_type=ConflictType.UNKNOWN,
-                    rationale="LLM analysis skipped — circuit breaker open, "
-                    "please check API key and connectivity",
+                    rationale="LLM analysis skipped — circuit breaker open",
                     confidence=0.0,
                 )
                 continue
 
             ctx.notify(
                 "conflict_analyst",
-                f"Analyzing {file_path} ({idx}/{total})",
+                f"Analyzing {file_path} ({idx}/{total_b})",
             )
 
             base_content = target_content = current_content = None
@@ -211,18 +377,16 @@ class ConflictAnalysisPhase(Phase):
 
             ctx.notify(
                 "conflict_analyst",
-                f"Analyzed {file_path} ({idx}/{total}) — "
+                f"Analyzed {file_path} ({idx}/{total_b}) — "
                 f"confidence={analysis.confidence:.0%}",
             )
 
-            if (
-                not circuit_breaker_open
-                and conflict_analyst.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD
-            ):
+            if conflict_analyst.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
                 circuit_breaker_open = True
 
         needs_human: list[str] = []
         decided = 0
+        total_analyses = len(state.conflict_analyses)
         for file_path, analysis in state.conflict_analyses.items():
             fd = file_diffs_map.get(file_path)  # type: ignore[assignment]
             if fd is None:
@@ -245,7 +409,7 @@ class ConflictAnalysisPhase(Phase):
 
             ctx.notify(
                 "conflict_analyst",
-                f"Strategy decided ({decided}/{total}): {file_path} → {strategy.value}",
+                f"Strategy decided ({decided}/{total_analyses}): {file_path} → {strategy.value}",
             )
 
         if ctx.config.history.enabled and ctx.config.history.commit_after_phase:

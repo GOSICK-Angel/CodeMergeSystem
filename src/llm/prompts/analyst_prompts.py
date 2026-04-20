@@ -1,4 +1,68 @@
+from __future__ import annotations
+
+from typing import Any
+
 from src.models.diff import FileDiff
+
+_ROUND_PER_VERSION_CHARS = 1000
+
+
+def _fmt_version(content: str | None, language: str) -> str:
+    if not content:
+        return "*(not available)*"
+    trimmed = content[:_ROUND_PER_VERSION_CHARS]
+    if len(content) > _ROUND_PER_VERSION_CHARS:
+        trimmed += "\n... [truncated]"
+    return f"```{language}\n{trimmed}\n```"
+
+
+def build_commit_round_prompt(
+    round_commits: list[dict[str, Any]],
+    file_three_way: dict[str, tuple[str | None, str | None, str | None]],
+    file_languages: dict[str, str],
+    project_context: str = "",
+) -> str:
+    commit_summary = "\n".join(
+        f"  - {c['sha'][:8]}: {c.get('message', '')}  ({len(c.get('files', []))} files)"
+        for c in round_commits
+    )
+
+    file_sections: list[str] = []
+    for fp, (base_c, current_c, target_c) in file_three_way.items():
+        lang = file_languages.get(fp, "")
+        file_sections.append(
+            f"## {fp}  (language: {lang})\n"
+            f"### Base (merge-base)\n{_fmt_version(base_c, lang)}\n"
+            f"### Fork (current branch)\n{_fmt_version(current_c, lang)}\n"
+            f"### Upstream (commit change)\n{_fmt_version(target_c, lang)}"
+        )
+
+    return (
+        f"Analyze the following {len(file_three_way)} files from "
+        f"{len(round_commits)} upstream commits being merged into a fork.\n\n"
+        f"# Project Context\n{project_context or 'No project context provided.'}\n\n"
+        f"# Commits in this round\n{commit_summary}\n\n"
+        f"# File Contents\n"
+        + "\n\n".join(file_sections)
+        + """
+
+For every file above provide a conflict analysis. Return JSON:
+{
+  "files": [
+    {
+      "file_path": "<exact path>",
+      "conflict_type": "concurrent_modification | logic_contradiction | semantic_equivalent | dependency_update | interface_change | deletion_vs_modification | refactor_vs_feature | configuration | unknown",
+      "recommended_strategy": "take_target | take_current | semantic_merge | escalate_human",
+      "confidence": 0.85,
+      "can_coexist": true,
+      "is_security_sensitive": false,
+      "rationale": "concise explanation",
+      "upstream_intent": {"description": "...", "intent_type": "bugfix | refactor | feature | upgrade | config", "confidence": 0.9},
+      "fork_intent": {"description": "...", "intent_type": "bugfix | refactor | feature | upgrade | config", "confidence": 0.8}
+    }
+  ]
+}"""
+    )
 
 
 ANALYST_SYSTEM = """You are a professional code merge expert specializing in semantic analysis of Git conflicts.

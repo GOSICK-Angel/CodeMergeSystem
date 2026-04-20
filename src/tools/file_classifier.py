@@ -167,11 +167,22 @@ def classify_file(
     risk_score = file_diff.risk_score
 
     if risk_score < 0.3:
-        return RiskLevel.AUTO_SAFE
+        base_level = RiskLevel.AUTO_SAFE
     elif risk_score < 0.6:
-        return RiskLevel.AUTO_RISKY
+        base_level = RiskLevel.AUTO_RISKY
     else:
-        return RiskLevel.HUMAN_REQUIRED
+        base_level = RiskLevel.HUMAN_REQUIRED
+
+    # Category-C files (both fork and upstream modified) are never truly safe:
+    # a clean patch apply may succeed but still drop semantic intent from one
+    # side. Enforce a floor of AUTO_RISKY so the executor runs gates, and
+    # escalate to HUMAN_REQUIRED when the diff is non-trivial.
+    if file_diff.change_category == FileChangeCategory.C:
+        if base_level == RiskLevel.AUTO_SAFE:
+            if file_diff.lines_changed >= 20 or file_diff.is_security_sensitive:
+                return RiskLevel.HUMAN_REQUIRED
+            return RiskLevel.AUTO_RISKY
+    return base_level
 
 
 def classify_three_way(

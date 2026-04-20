@@ -54,7 +54,10 @@ class ReverseImpactScanner:
                         cache[fp] = ""
                         continue
                     try:
-                        content = abs_path.read_text(encoding="utf-8")
+                        try:
+                            content = abs_path.read_text(encoding="utf-8")
+                        except UnicodeDecodeError:
+                            continue
                     except (UnicodeDecodeError, OSError):
                         content = ""
                     cache[fp] = content

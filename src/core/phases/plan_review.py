@@ -102,12 +102,21 @@ class PlanReviewPhase(Phase):
                 f"({len(verdict.issues)} issues) — {verdict.summary}",
             )
 
-            is_llm_failure = (
+            is_llm_failure = verdict.result == PlanJudgeResult.LLM_UNAVAILABLE or (
                 len(verdict.issues) == 0
                 and verdict.summary
-                and "parse failed" in verdict.summary.lower()
+                and (
+                    "parse failed" in verdict.summary.lower()
+                    or "llm unavailable" in verdict.summary.lower()
+                )
             )
             if is_llm_failure:
+                # Do NOT mark as APPROVED. Surface to the user and require
+                # explicit plan approval via plan_human_review before any merge.
+                verdict = verdict.model_copy(
+                    update={"result": PlanJudgeResult.LLM_UNAVAILABLE}
+                )
+                state.plan_judge_verdict = verdict
                 round_log = self._build_round_log(round_num, verdict, negotiation_msgs)
                 state.plan_review_log.append(round_log)
                 state.review_conclusion = ReviewConclusion(
@@ -115,18 +124,27 @@ class PlanReviewPhase(Phase):
                     final_round=round_num,
                     total_rounds=round_num + 1,
                     max_rounds=max_rounds,
-                    summary=f"Plan Judge LLM call failed — {verdict.summary}",
+                    summary=(
+                        "Plan Judge LLM unavailable — plan was NOT reviewed. "
+                        "Human approval required before merge."
+                    ),
                 )
+                # Build one UserDecisionItem per actionable file so the
+                # CLI/TUI can surface them as pending decisions even though
+                # the judge never assigned HUMAN_REQUIRED.
+                user_items = self._build_fallback_decision_items(state)
+                state.pending_user_decisions = user_items
                 self._complete_phase(state, phase_result, ctx)
                 logger.warning(
                     "Plan judge LLM call failed (round %d) — "
-                    "skipping review, proceeding with current plan",
+                    "surfacing %d files for human review (no silent approval)",
                     round_num,
+                    len(user_items),
                 )
                 ctx.state_machine.transition(
                     state,
                     SystemStatus.AWAITING_HUMAN,
-                    "plan judge LLM unavailable, proceeding with current plan",
+                    "plan judge LLM unavailable — awaiting explicit human approval",
                 )
                 return PhaseOutcome(
                     target_status=SystemStatus.AWAITING_HUMAN,
@@ -449,6 +467,38 @@ class PlanReviewPhase(Phase):
                 )
             ),
         )
+
+    def _build_fallback_decision_items(
+        self, state: MergeState
+    ) -> list[UserDecisionItem]:
+        """When the LLM judge is unavailable, surface every actionable file so
+        the user is forced to approve the plan explicitly — no silent merge.
+        """
+        if state.merge_plan is None:
+            return []
+
+        diff_map = self._collect_file_diff_info(state)
+
+        items: list[UserDecisionItem] = []
+        for batch in state.merge_plan.phases:
+            for fp in batch.file_paths:
+                context = self._build_risk_context(fp, batch.risk_level, {}, diff_map)
+                options = self._build_decision_options(fp, batch.risk_level, context)
+                description = (
+                    "Plan Judge LLM was unavailable; human approval required. "
+                    + self._build_description(fp, batch.risk_level, context)
+                )
+                items.append(
+                    UserDecisionItem(
+                        item_id=str(uuid4()),
+                        file_path=fp,
+                        description=description,
+                        risk_context=context,
+                        current_classification=batch.risk_level.value,
+                        options=options,
+                    )
+                )
+        return items
 
     def _build_user_decision_items(self, state: MergeState) -> list[UserDecisionItem]:
         if state.merge_plan is None:

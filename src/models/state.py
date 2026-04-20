@@ -82,6 +82,14 @@ class MergeState(BaseModel):
     plan_disputes: list[PlanDisputeRequest] = Field(default_factory=list)
 
     conflict_analyses: dict[str, ConflictAnalysis] = Field(default_factory=dict)
+    pending_conflict_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Files that auto_merge could not apply (skipped layers + "
+            "non-replayable commits). ConflictAnalysisPhase uses this as an "
+            "explicit worklist so cherry-pick gaps escalate to human decision."
+        ),
+    )
 
     human_decision_requests: dict[str, HumanDecisionRequest] = Field(
         default_factory=dict
@@ -91,6 +99,14 @@ class MergeState(BaseModel):
     judge_verdict: JudgeVerdict | None = None
     judge_repair_rounds: int = 0
     judge_verdicts_log: list[dict[str, Any]] = Field(default_factory=list)
+    judge_resolution: Literal["accept", "abort", "rerun"] | None = Field(
+        default=None,
+        description=(
+            "Human acknowledgement after a non-PASS judge verdict. "
+            "accept=ship report with FAIL noted; abort=terminal FAILED; "
+            "rerun=return to AUTO_MERGING for another attempt."
+        ),
+    )
 
     gate_baselines: dict[str, str] = Field(
         default_factory=dict,

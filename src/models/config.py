@@ -414,6 +414,12 @@ class MergeConfig(BaseModel):
     )
     max_files_per_run: int = Field(default=500, ge=1)
     max_plan_revision_rounds: int = Field(default=5, ge=1, le=20)
+    commit_round_size: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Max commits per round in commit-stream conflict analysis.",
+    )
     llm: LLMConfig = Field(default_factory=LLMConfig)
     agents: AgentsLLMConfig = Field(default_factory=AgentsLLMConfig)
     thresholds: ThresholdConfig = Field(default_factory=ThresholdConfig)

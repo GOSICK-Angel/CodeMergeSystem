@@ -76,13 +76,30 @@ class PlannerJudgeAgent(BaseAgent):
             from datetime import datetime
 
             error_type = type(e).__name__
+            is_llm_unavailable = any(
+                marker in error_type
+                for marker in ("AgentExhaustedError", "APIError", "RateLimitError")
+            ) or any(
+                marker in str(e)
+                for marker in ("LLM call failed", "502", "503", "No available accounts")
+            )
+            result = (
+                PlanJudgeResult.LLM_UNAVAILABLE
+                if is_llm_unavailable
+                else PlanJudgeResult.REVISION_NEEDED
+            )
+            summary_prefix = (
+                "Plan Judge LLM unavailable"
+                if is_llm_unavailable
+                else f"Review parse failed ({error_type})"
+            )
             return PlanJudgeVerdict(
-                result=PlanJudgeResult.REVISION_NEEDED,
+                result=result,
                 revision_round=revision_round,
                 issues=[],
                 approved_files_count=0,
                 flagged_files_count=0,
-                summary=f"Review parse failed ({error_type}): {e}",
+                summary=f"{summary_prefix}: {str(e)[:200]}",
                 judge_model=self.llm_config.model,
                 timestamp=datetime.now(),
             )

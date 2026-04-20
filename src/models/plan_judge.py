@@ -9,6 +9,7 @@ class PlanJudgeResult(str, Enum):
     APPROVED = "approved"
     REVISION_NEEDED = "revision_needed"
     CRITICAL_REPLAN = "critical_replan"
+    LLM_UNAVAILABLE = "llm_unavailable"
 
 
 class PlanIssue(BaseModel):

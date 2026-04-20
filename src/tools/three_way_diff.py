@@ -2,8 +2,23 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from src.tools.git_tool import GitTool
+
+
+def _safe_read_text(path: Path) -> str | None:
+    """Read a file as UTF-8 text, returning None on binary / decode / IO errors.
+
+    Defensive wrapper for merge-time file reads: binary assets (icons, lock
+    files with BOMs, compiled bundles) coexist with source in the diff set.
+    Returning None lets callers treat binary files as "no textual content"
+    rather than crash the whole phase.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return None
 
 
 @dataclass
@@ -27,7 +42,7 @@ class ThreeWayDiff:
         abs_path = self.git_tool.repo_path / file_path
         merged_content: str | None = None
         if abs_path.exists():
-            merged_content = abs_path.read_text(encoding="utf-8")
+            merged_content = _safe_read_text(abs_path)
 
         return ThreeWayResult(
             file_path=file_path,
@@ -46,7 +61,9 @@ class ThreeWayDiff:
         if not abs_path.exists():
             return False
 
-        merged_content = abs_path.read_text(encoding="utf-8")
+        merged_content = _safe_read_text(abs_path)
+        if merged_content is None:
+            return False
         return merged_content == upstream_content
 
     def verify_d_missing_present(self, file_path: str) -> bool:
@@ -74,7 +91,9 @@ class ThreeWayDiff:
         if not abs_path.exists():
             return list(additions)
 
-        merged_content = abs_path.read_text(encoding="utf-8")
+        merged_content = _safe_read_text(abs_path)
+        if merged_content is None:
+            return list(additions)
         merged_symbols = _extract_symbols(merged_content)
 
         return [name for name in additions if name not in merged_symbols]
@@ -83,14 +102,19 @@ class ThreeWayDiff:
         abs_path = self.git_tool.repo_path / file_path
         if not abs_path.exists():
             return 0
-        content = abs_path.read_text(encoding="utf-8")
+        content = _safe_read_text(abs_path)
+        if content is None:
+            return 0
         return len(re.findall(r"TODO\s*\[merge\]", content))
 
     def find_todo_check(self, file_path: str) -> list[int]:
         abs_path = self.git_tool.repo_path / file_path
         if not abs_path.exists():
             return []
-        lines = abs_path.read_text(encoding="utf-8").splitlines()
+        raw = _safe_read_text(abs_path)
+        if raw is None:
+            return []
+        lines = raw.splitlines()
         return [
             i + 1
             for i, line in enumerate(lines)
@@ -110,7 +134,7 @@ class ThreeWayDiff:
         base = self.git_tool.get_file_content(merge_base, file_path) or ""
         upstream = self.git_tool.get_file_content(upstream_ref, file_path) or ""
         abs_path = self.git_tool.repo_path / file_path
-        merged = abs_path.read_text(encoding="utf-8") if abs_path.exists() else ""
+        merged = (_safe_read_text(abs_path) or "") if abs_path.exists() else ""
 
         expected = _extract_top_level_invocations(
             base

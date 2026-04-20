@@ -28,9 +28,13 @@ from src.llm.prompts.judge_prompts import (
     build_file_review_prompt,
     build_verdict_prompt,
 )
-from src.llm.response_parser import parse_file_review_issues, parse_judge_verdict
+from src.llm.response_parser import (
+    parse_batch_file_review_issues,
+    parse_file_review_issues,
+    parse_judge_verdict,
+)
 from src.tools.git_tool import GitTool
-from src.tools.three_way_diff import ThreeWayDiff
+from src.tools.three_way_diff import ThreeWayDiff, _safe_read_text
 from src.tools.syntax_checker import check_syntax as check_file_syntax
 
 
@@ -75,7 +79,7 @@ class JudgeAgent(BaseAgent):
             if self.git_tool is not None:
                 abs_path = self.git_tool.repo_path / file_path
                 if abs_path.exists():
-                    merged_content = abs_path.read_text(encoding="utf-8")
+                    merged_content = _safe_read_text(abs_path) or ""
 
             issues = await self.review_file(
                 file_path,
@@ -720,7 +724,7 @@ class JudgeAgent(BaseAgent):
                     match_count=0,
                 )
 
-            current_content = abs_path.read_text(encoding="utf-8")
+            current_content = _safe_read_text(abs_path) or ""
             current_lines = {
                 ln.strip() for ln in current_content.splitlines() if ln.strip()
             }
@@ -869,6 +873,89 @@ class JudgeAgent(BaseAgent):
             )
         return instructions
 
+    _BATCH_SIZE = 8
+
+    def _review_file_deterministic(
+        self,
+        file_path: str,
+        merged_content: str,
+    ) -> list[JudgeIssue]:
+        issues: list[JudgeIssue] = []
+
+        syntax_result = check_file_syntax(file_path, merged_content)
+        if not syntax_result.valid:
+            for syn_err in syntax_result.errors:
+                issues.append(
+                    JudgeIssue(
+                        file_path=file_path,
+                        issue_level=IssueSeverity.CRITICAL,
+                        issue_type="syntax_error",
+                        description=(
+                            f"Syntax error at line {syn_err.line}, "
+                            f"col {syn_err.column}: {syn_err.message}"
+                        ),
+                        affected_lines=[syn_err.line] if syn_err.line > 0 else [],
+                        must_fix_before_merge=True,
+                    )
+                )
+
+        for marker in ("<<<<<<<", "=======", ">>>>>>>"):
+            if marker in merged_content:
+                issues.append(
+                    JudgeIssue(
+                        file_path=file_path,
+                        issue_level=IssueSeverity.CRITICAL,
+                        issue_type="unresolved_conflict",
+                        description=f"Conflict marker '{marker}' found in merged content",
+                        must_fix_before_merge=True,
+                    )
+                )
+                break
+
+        return issues
+
+    async def _review_files_batch_llm(
+        self,
+        chunk: list[tuple[str, str, "FileDecisionRecord", FileDiff]],
+        state: ReadOnlyStateView,
+    ) -> list[JudgeIssue]:
+        from src.llm.prompts.judge_prompts import build_batch_file_review_prompt
+
+        all_issues: list[JudgeIssue] = []
+
+        for file_path, merged_content, _record, _fd in chunk:
+            all_issues.extend(
+                self._review_file_deterministic(file_path, merged_content)
+            )
+
+        file_reviews = [
+            {
+                "file_path": fp,
+                "merged_content": content,
+                "decision_record": record,
+                "original_diff": fd,
+            }
+            for fp, content, record, fd in chunk
+        ]
+        prompt = build_batch_file_review_prompt(
+            file_reviews,
+            project_context=state.config.project_context,
+        )
+        try:
+            raw = await self._call_llm_with_retry(
+                [{"role": "user", "content": prompt}], system=JUDGE_SYSTEM
+            )
+            file_paths = [fp for fp, _, _, _ in chunk]
+            per_file = parse_batch_file_review_issues(str(raw), file_paths)
+            for issues_list in per_file.values():
+                all_issues.extend(issues_list)
+        except Exception as e:
+            self.logger.error(
+                "Batch LLM review failed for chunk of %d: %s", len(chunk), e
+            )
+
+        return all_issues
+
     async def review_batch(
         self,
         layer_id: int | None,
@@ -880,6 +967,9 @@ class JudgeAgent(BaseAgent):
         file_diffs_map = {fd.file_path: fd for fd in state.file_diffs}
         all_issues: list[JudgeIssue] = []
 
+        safe_files: list[tuple[str, str, FileDecisionRecord, FileDiff]] = []
+        risky_files: list[tuple[str, str, FileDecisionRecord, FileDiff]] = []
+
         for file_path in file_paths:
             fd = file_diffs_map.get(file_path)
             record = state.file_decision_records.get(file_path)
@@ -890,19 +980,32 @@ class JudgeAgent(BaseAgent):
             if self.git_tool is not None:
                 abs_path = self.git_tool.repo_path / file_path
                 if abs_path.exists():
-                    try:
-                        merged_content = abs_path.read_text(encoding="utf-8")
-                    except OSError:
-                        pass
+                    merged_content = _safe_read_text(abs_path) or ""
 
-            issues = await self.review_file(
-                file_path,
-                merged_content,
-                record,
-                fd,
-                project_context=state.config.project_context,
+            if fd.risk_level == RiskLevel.AUTO_SAFE:
+                safe_files.append((file_path, merged_content, record, fd))
+            else:
+                risky_files.append((file_path, merged_content, record, fd))
+
+        for file_path, merged_content, _record, _fd in safe_files:
+            all_issues.extend(
+                self._review_file_deterministic(file_path, merged_content)
             )
-            all_issues.extend(issues)
+
+        for i in range(0, len(risky_files), self._BATCH_SIZE):
+            chunk = risky_files[i : i + self._BATCH_SIZE]
+            chunk_issues = await self._review_files_batch_llm(chunk, state)
+            all_issues.extend(chunk_issues)
+
+        self.logger.info(
+            "review_batch layer=%s: %d safe (deterministic), %d risky → %d LLM calls",
+            layer_id,
+            len(safe_files),
+            len(risky_files),
+            (len(risky_files) + self._BATCH_SIZE - 1) // self._BATCH_SIZE
+            if risky_files
+            else 0,
+        )
 
         blocking = [i for i in all_issues if i.must_fix_before_merge]
         approved = len(blocking) == 0

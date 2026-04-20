@@ -304,6 +304,115 @@ def parse_file_review_issues(
     return issues
 
 
+def parse_commit_round_analyses(
+    raw: str | dict[str, Any], file_paths: list[str]
+) -> dict[str, "ConflictAnalysis"]:
+    from uuid import uuid4 as _uuid4
+
+    result: dict[str, ConflictAnalysis] = {}
+    try:
+        data = _extract_json(raw)
+    except ParseError:
+        return result
+
+    for entry in data.get("files", []):
+        fp = entry.get("file_path", "")
+        if fp not in file_paths:
+            continue
+
+        conflict_type_raw = entry.get("conflict_type", "unknown")
+        try:
+            _validate_enum(conflict_type_raw, ConflictType, "conflict_type")
+            conflict_type = ConflictType(conflict_type_raw)
+        except ParseError:
+            conflict_type = ConflictType.UNKNOWN
+
+        recommended_raw = entry.get("recommended_strategy", "escalate_human")
+        try:
+            _validate_enum(recommended_raw, MergeDecision, "recommended_strategy")
+            recommended = MergeDecision(recommended_raw)
+        except ParseError:
+            recommended = MergeDecision.ESCALATE_HUMAN
+
+        try:
+            confidence = _validate_confidence(float(entry.get("confidence", 0.5)))
+        except (ParseError, ValueError):
+            confidence = 0.5
+
+        up_data = entry.get("upstream_intent", {})
+        fk_data = entry.get("fork_intent", {})
+        upstream_intent = ChangeIntent(
+            description=up_data.get("description", ""),
+            intent_type=up_data.get("intent_type", "unknown"),
+            confidence=float(up_data.get("confidence", 0.5)),
+        )
+        fork_intent = ChangeIntent(
+            description=fk_data.get("description", ""),
+            intent_type=fk_data.get("intent_type", "unknown"),
+            confidence=float(fk_data.get("confidence", 0.5)),
+        )
+        conflict_point = ConflictPoint(
+            file_path=fp,
+            hunk_id=str(_uuid4()),
+            conflict_type=conflict_type,
+            upstream_intent=upstream_intent,
+            fork_intent=fork_intent,
+            can_coexist=bool(entry.get("can_coexist", False)),
+            suggested_decision=recommended,
+            confidence=confidence,
+            rationale=entry.get("rationale", ""),
+        )
+        result[fp] = ConflictAnalysis(
+            file_path=fp,
+            conflict_points=[conflict_point],
+            overall_confidence=confidence,
+            recommended_strategy=recommended,
+            conflict_type=conflict_type,
+            can_coexist=bool(entry.get("can_coexist", False)),
+            is_security_sensitive=bool(entry.get("is_security_sensitive", False)),
+            rationale=entry.get("rationale", ""),
+            confidence=confidence,
+        )
+
+    return result
+
+
+def parse_batch_file_review_issues(
+    raw: str | dict[str, Any], file_paths: list[str]
+) -> dict[str, list[JudgeIssue]]:
+    result: dict[str, list[JudgeIssue]] = {fp: [] for fp in file_paths}
+    try:
+        data = _extract_json(raw)
+    except ParseError:
+        return result
+
+    for file_entry in data.get("files", []):
+        fp = file_entry.get("file_path", "")
+        if fp not in result:
+            continue
+        for item in file_entry.get("issues", []):
+            level_raw = item.get("issue_level", "medium")
+            try:
+                _validate_enum(level_raw, IssueSeverity, "issue_level")
+                level = IssueSeverity(level_raw)
+            except ParseError:
+                level = IssueSeverity.MEDIUM
+            result[fp].append(
+                JudgeIssue(
+                    file_path=fp,
+                    issue_level=level,
+                    issue_type=item.get("issue_type", "other"),
+                    description=item.get("description", ""),
+                    affected_lines=item.get("affected_lines", []),
+                    suggested_fix=item.get("suggested_fix"),
+                    must_fix_before_merge=bool(
+                        item.get("must_fix_before_merge", False)
+                    ),
+                )
+            )
+    return result
+
+
 def _severity_order(severity: IssueSeverity) -> int:
     order = {
         IssueSeverity.INFO: 0,

@@ -8,9 +8,10 @@ from src.models.decision import MergeDecision
 from src.models.state import MergeState
 from src.llm.prompts.analyst_prompts import (
     ANALYST_SYSTEM,
+    build_commit_round_prompt,
     build_conflict_analysis_prompt,
 )
-from src.llm.response_parser import parse_conflict_analysis
+from src.llm.response_parser import parse_commit_round_analyses, parse_conflict_analysis
 from src.tools.git_tool import GitTool
 
 
@@ -195,6 +196,34 @@ class ConflictAnalystAgent(BaseAgent):
         adjustment = type_adjustment.get(analysis.conflict_type, 0.0)
         final = calibrated + adjustment + base_bonus
         return max(0.10, min(0.95, round(final, 3)))
+
+    async def analyze_commit_round(
+        self,
+        round_commits: list[dict],
+        file_three_way: dict[str, tuple[str | None, str | None, str | None]],
+        file_languages: dict[str, str],
+        project_context: str = "",
+    ) -> dict[str, "ConflictAnalysis"]:
+        if not file_three_way:
+            return {}
+
+        prompt = build_commit_round_prompt(
+            round_commits, file_three_way, file_languages, project_context
+        )
+        file_paths = list(file_three_way.keys())
+        try:
+            raw = await self._call_llm_with_retry(
+                [{"role": "user", "content": prompt}], system=ANALYST_SYSTEM
+            )
+            return parse_commit_round_analyses(str(raw), file_paths)
+        except Exception as e:
+            self.logger.error(
+                "Commit-round analysis failed (%d files, %d commits): %s",
+                len(file_paths),
+                len(round_commits),
+                e,
+            )
+            return {}
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus

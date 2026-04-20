@@ -126,6 +126,65 @@ Return JSON:
 }}"""
 
 
+_BATCH_PER_FILE_CONTENT_CHARS = 2000
+
+
+def build_batch_file_review_prompt(
+    file_reviews: list[dict],
+    project_context: str = "",
+) -> str:
+    sections: list[str] = []
+    for i, fr in enumerate(file_reviews, 1):
+        fp: str = fr["file_path"]
+        fd = fr["original_diff"]
+        record = fr["decision_record"]
+        content: str = fr["merged_content"]
+        language: str = fd.language or "unknown"
+        decision_val = (
+            record.decision.value
+            if hasattr(record.decision, "value")
+            else record.decision
+        )
+        sections.append(
+            f"## File {i}: {fp}\n"
+            f"Language: {language} | Decision: {decision_val}\n"
+            f"Lines added: {fd.lines_added}, deleted: {fd.lines_deleted}, "
+            f"security: {fd.is_security_sensitive}\n"
+            f"```{language}\n"
+            f"{_truncate_content(content, _BATCH_PER_FILE_CONTENT_CHARS)}\n"
+            f"```"
+        )
+
+    return (
+        f"Review the following {len(file_reviews)} merged files.\n\n"
+        f"# Project Context\n"
+        f"{project_context or 'No project context provided.'}\n\n"
+        + "\n\n".join(sections)
+        + """
+
+For each file check: conflict markers, fork logic preserved, upstream changes present.
+
+Return JSON:
+{
+  "files": [
+    {
+      "file_path": "<exact file path>",
+      "issues": [
+        {
+          "issue_level": "critical | high | medium | low | info",
+          "issue_type": "missing_logic | wrong_merge | unresolved_conflict | syntax_error | other",
+          "description": "Specific issue description",
+          "affected_lines": [],
+          "suggested_fix": "How to fix",
+          "must_fix_before_merge": true
+        }
+      ]
+    }
+  ]
+}"""
+    )
+
+
 def build_re_evaluate_prompt(
     rebuttal_summary: str,
     original_issues_summary: str,

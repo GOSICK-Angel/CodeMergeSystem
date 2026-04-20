@@ -24,6 +24,7 @@ VALID_TRANSITIONS: dict[SystemStatus, list[SystemStatus]] = {
         SystemStatus.ANALYZING_CONFLICTS,
         SystemStatus.JUDGE_REVIEWING,
         SystemStatus.PLAN_DISPUTE_PENDING,
+        SystemStatus.AWAITING_HUMAN,
         SystemStatus.FAILED,
         SystemStatus.PAUSED,
     ],
@@ -41,6 +42,7 @@ VALID_TRANSITIONS: dict[SystemStatus, list[SystemStatus]] = {
         SystemStatus.AUTO_MERGING,
         SystemStatus.ANALYZING_CONFLICTS,
         SystemStatus.JUDGE_REVIEWING,
+        SystemStatus.GENERATING_REPORT,
         SystemStatus.FAILED,
     ],
     SystemStatus.JUDGE_REVIEWING: [

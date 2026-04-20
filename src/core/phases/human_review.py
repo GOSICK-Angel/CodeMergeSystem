@@ -4,6 +4,7 @@ import logging
 
 from src.cli.paths import get_report_dir
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
+from src.models.plan import MergePhase
 from src.models.plan_review import PlanHumanDecision
 from src.models.state import MergeState, SystemStatus
 from src.tools.merge_plan_report import write_merge_plan_report
@@ -26,6 +27,51 @@ class HumanReviewPhase(Phase):
 
     async def execute(self, state: MergeState, ctx: PhaseContext) -> PhaseOutcome:
         logger.info("Entering AWAITING_HUMAN status")
+
+        # Case 0: judge review already ran and paused for human acknowledgement.
+        # If the user set `state.judge_resolution` via the CLI (resume
+        # --decisions), route accordingly so --no-tui users are not deadlocked.
+        if (
+            state.judge_verdict is not None
+            and state.current_phase == MergePhase.JUDGE_REVIEW
+            and state.judge_resolution is not None
+        ):
+            res = state.judge_resolution
+            if res == "accept":
+                ctx.state_machine.transition(
+                    state,
+                    SystemStatus.GENERATING_REPORT,
+                    "user accepted judge verdict (report only)",
+                )
+                return PhaseOutcome(
+                    target_status=SystemStatus.GENERATING_REPORT,
+                    reason="user accepted judge verdict",
+                    checkpoint_tag="judge_accepted",
+                )
+            if res == "abort":
+                ctx.state_machine.transition(
+                    state,
+                    SystemStatus.FAILED,
+                    "user aborted after judge FAIL",
+                )
+                return PhaseOutcome(
+                    target_status=SystemStatus.FAILED,
+                    reason="user aborted after judge FAIL",
+                    checkpoint_tag="judge_aborted",
+                )
+            if res == "rerun":
+                # Clear resolution so next pause requires fresh input
+                state.judge_resolution = None
+                ctx.state_machine.transition(
+                    state,
+                    SystemStatus.AUTO_MERGING,
+                    "user requested rerun of auto-merge after judge FAIL",
+                )
+                return PhaseOutcome(
+                    target_status=SystemStatus.AUTO_MERGING,
+                    reason="user requested rerun",
+                    checkpoint_tag="judge_rerun",
+                )
 
         # Case 1: waiting for file-level conflict decisions from conflict analysis
         if state.human_decision_requests:

@@ -54,7 +54,92 @@ def resume_command_impl(
         return
 
     if decisions and state.status == SystemStatus.AWAITING_HUMAN:
+        import yaml as _yaml
+        from pathlib import Path as _Path
         from src.agents.human_interface_agent import HumanInterfaceAgent
+        from src.models.plan_review import PlanHumanDecision, PlanHumanReview
+
+        try:
+            _raw = _yaml.safe_load(_Path(decisions).read_text(encoding="utf-8"))
+        except Exception as _e:
+            console.print(f"[red]Failed to read decisions file: {_e}[/red]")
+            sys.exit(1)
+
+        plan_approval = _raw.get("plan_approval") if isinstance(_raw, dict) else None
+        if plan_approval and state.plan_human_review is None:
+            try:
+                pd = PlanHumanDecision(str(plan_approval).lower())
+            except ValueError:
+                console.print(
+                    f"[red]Invalid plan_approval: {plan_approval!r} "
+                    f"(expected approve|reject|modify)[/red]"
+                )
+                sys.exit(1)
+
+            # Apply per-item choices (plan-level UserDecisionItem list) if
+            # provided. YAML shape:
+            #   item_decisions:
+            #     - file_path: path/to/file.py
+            #       user_choice: downgrade_risky  # approve_human|downgrade_risky|downgrade_safe
+            raw_items = (
+                _raw.get("item_decisions") if isinstance(_raw, dict) else None
+            ) or []
+            by_path = {
+                it["file_path"]: it
+                for it in raw_items
+                if isinstance(it, dict) and it.get("file_path")
+            }
+            applied = 0
+            for idx, item in enumerate(state.pending_user_decisions):
+                payload = by_path.get(item.file_path)
+                if not payload:
+                    continue
+                choice = payload.get("user_choice")
+                if not choice:
+                    continue
+                valid_keys = {o.key for o in item.options}
+                if choice not in valid_keys:
+                    console.print(
+                        f"[red]Invalid user_choice {choice!r} for "
+                        f"{item.file_path} (valid: {sorted(valid_keys)})[/red]"
+                    )
+                    sys.exit(1)
+                state.pending_user_decisions[idx] = item.model_copy(
+                    update={
+                        "user_choice": choice,
+                        "user_input": payload.get("notes"),
+                    }
+                )
+                applied += 1
+            if applied:
+                console.print(f"[green]Applied {applied} per-file choices[/green]")
+
+            state.plan_human_review = PlanHumanReview(
+                decision=pd,
+                reviewer_name=(_raw.get("reviewer") if isinstance(_raw, dict) else None)
+                or "cli",
+                reviewer_notes=(_raw.get("notes") if isinstance(_raw, dict) else None),
+                item_decisions=list(state.pending_user_decisions),
+            )
+            console.print(
+                f"[green]Plan approval set to {pd.value!r} via decisions file[/green]"
+            )
+
+        judge_resolution = (
+            _raw.get("judge_resolution") if isinstance(_raw, dict) else None
+        )
+        if judge_resolution is not None:
+            val = str(judge_resolution).lower().strip()
+            if val not in {"accept", "abort", "rerun"}:
+                console.print(
+                    f"[red]Invalid judge_resolution: {judge_resolution!r} "
+                    f"(expected accept|abort|rerun)[/red]"
+                )
+                sys.exit(1)
+            state.judge_resolution = val  # type: ignore[assignment]
+            console.print(
+                f"[green]Judge resolution set to {val!r} via decisions file[/green]"
+            )
 
         pending = [
             req
@@ -74,20 +159,12 @@ def resume_command_impl(
                 f"[green]Loaded {decided_count} decisions from {decisions}[/green]"
             )
 
-            still_pending = [
-                fp
-                for fp, req in state.human_decision_requests.items()
-                if req.human_decision is None
-            ]
-            if not still_pending:
-                from src.core.state_machine import StateMachine
-
-                sm = StateMachine()
-                sm.transition(
-                    state,
-                    SystemStatus.AWAITING_HUMAN,
-                    "all human decisions collected from file — will execute on next run",
-                )
+            # When all decisions are in, the next orchestrator.run() will
+            # re-enter HumanReviewPhase which now sees 0 pending requests
+            # and routes through executor → JUDGE_REVIEWING on its own.
+            # (A prior version tried `sm.transition(state, AWAITING_HUMAN, …)`
+            # here which is a no-op same-state transition; the state machine
+            # rejects same-state transitions, so we just fall through.)
 
     orchestrator = Orchestrator(state.config)
 
