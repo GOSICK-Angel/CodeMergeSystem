@@ -2,6 +2,7 @@ import fnmatch
 import re
 from datetime import datetime
 from src.agents.base_agent import BaseAgent
+from src.core.parallel_file_runner import ParallelFileRunner
 from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage, MessageType
 from src.models.plan import MergePhase
@@ -72,26 +73,37 @@ class JudgeAgent(BaseAgent):
             elif fd and fd.is_security_sensitive:
                 high_risk_records[fp] = record
 
-        for file_path, record in high_risk_records.items():
+        async def _review_one(file_path: str) -> list[JudgeIssue]:
+            record = high_risk_records[file_path]
             fd = file_diffs_map.get(file_path)
             if fd is None:
-                continue
-
+                return []
             merged_content = ""
             if self.git_tool is not None:
                 abs_path = self.git_tool.repo_path / file_path
                 if abs_path.exists():
                     merged_content = _safe_read_text(abs_path) or ""
-
-            issues = await self.review_file(
+            return await self.review_file(
                 file_path,
                 merged_content,
                 record,
                 fd,
                 project_context=state.config.project_context,
             )
-            all_issues.extend(issues)
-            reviewed_files.append(file_path)
+
+        runner = ParallelFileRunner.from_api_key_env_list(
+            self.llm_config.api_key_env_list,
+            override=state.config.parallel_file_concurrency,
+        )
+        file_issues = await runner.run_files(
+            list(high_risk_records.keys()), _review_one
+        )
+        for fp, result in file_issues.items():
+            if isinstance(result, BaseException):
+                self.logger.error("Parallel judge review failed for %s: %s", fp, result)
+                continue
+            all_issues.extend(result)
+            reviewed_files.append(fp)
 
         reviewed_files.extend(deterministic_veto_files)
         verdict = await self._compute_final_verdict(reviewed_files, all_issues)
@@ -1012,10 +1024,30 @@ class JudgeAgent(BaseAgent):
                 self._review_file_deterministic(file_path, merged_content)
             )
 
-        for i in range(0, len(risky_files), self._BATCH_SIZE):
-            chunk = risky_files[i : i + self._BATCH_SIZE]
-            chunk_issues = await self._review_files_batch_llm(chunk, state)
-            all_issues.extend(chunk_issues)
+        chunks = [
+            risky_files[i : i + self._BATCH_SIZE]
+            for i in range(0, len(risky_files), self._BATCH_SIZE)
+        ]
+
+        async def _process_chunk(idx: int) -> list[JudgeIssue]:
+            return await self._review_files_batch_llm(chunks[idx], state)
+
+        chunk_runner = ParallelFileRunner.from_api_key_env_list(
+            self.llm_config.api_key_env_list,
+            override=state.config.parallel_file_concurrency,
+        )
+        chunk_results = await chunk_runner.run_files(
+            list(range(len(chunks))), _process_chunk
+        )
+        for idx in range(len(chunks)):
+            result = chunk_results.get(idx)
+            if isinstance(result, BaseException):
+                self.logger.error(
+                    "Parallel batch LLM review failed for chunk %d: %s", idx, result
+                )
+                continue
+            if result is not None:
+                all_issues.extend(result)
 
         self.logger.info(
             "review_batch layer=%s: %d safe (deterministic), %d risky → %d LLM calls",

@@ -1,4 +1,5 @@
 from src.agents.base_agent import BaseAgent
+from src.core.parallel_file_runner import ParallelFileRunner
 from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage, MessageType
 from src.models.plan import MergePhase
@@ -48,11 +49,10 @@ class ConflictAnalystAgent(BaseAgent):
         for fd in view.file_diffs:
             file_diffs_map[fd.file_path] = fd
 
-        for file_path in high_risk_files:
-            fd = file_diffs_map.get(file_path)  # type: ignore[assignment]
+        async def _analyze_one(file_path: str) -> ConflictAnalysis | None:
+            fd = file_diffs_map.get(file_path)
             if fd is None:
-                continue
-
+                return None
             base_content = target_content = current_content = None
             if self.git_tool and hasattr(view, "_merge_base"):
                 base_content, current_content, target_content = (
@@ -63,15 +63,27 @@ class ConflictAnalystAgent(BaseAgent):
                         file_path,
                     )
                 )
-
-            analysis = await self.analyze_file(
+            return await self.analyze_file(
                 fd,
                 base_content=base_content,
                 current_content=current_content,
                 target_content=target_content,
                 project_context=view.config.project_context,
             )
-            results[file_path] = analysis
+
+        runner = ParallelFileRunner.from_api_key_env_list(
+            self.llm_config.api_key_env_list,
+            override=view.config.parallel_file_concurrency,
+        )
+        file_results = await runner.run_files(high_risk_files, _analyze_one)
+        for fp, result in file_results.items():
+            if isinstance(result, BaseException):
+                self.logger.error(
+                    "Parallel conflict analysis failed for %s: %s", fp, result
+                )
+                continue
+            if result is not None:
+                results[fp] = result
 
         state.conflict_analyses.update(results)
 
