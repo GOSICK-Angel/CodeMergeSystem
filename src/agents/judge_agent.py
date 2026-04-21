@@ -1137,6 +1137,26 @@ class JudgeAgent(BaseAgent):
             round_num=current_verdict.round_num + 1,
         )
 
+    async def meta_review(self, state: MergeState) -> dict[str, str]:
+        """Meta-review: big-picture assessment of a failed judge review cycle.
+
+        Returns a dict with 'assessment' and 'recommendation' keys.
+        Uses META-JUDGE-* gates so the call is contract-compliant.
+        """
+        from src.llm.prompts.gate_registry import get_gate
+
+        view = self.restricted_view(state)
+        system = get_gate("META-JUDGE-SYSTEM").render()
+        prompt = get_gate("META-JUDGE-REVIEW").render(
+            list(view.judge_verdicts_log),
+            view.judge_repair_rounds,
+        )
+        raw = await self._call_llm_with_retry(
+            [{"role": "user", "content": prompt}],
+            system=system,
+        )
+        return _parse_meta_review_json(str(raw))
+
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus
 
@@ -1153,6 +1173,24 @@ def _extract_diff_ranges(original_diff: FileDiff) -> list[tuple[int, int]]:
             (1, original_diff.lines_added + original_diff.lines_deleted + 100)
         )
     return ranges
+
+
+def _parse_meta_review_json(raw: str) -> dict[str, str]:
+    import json as _json2
+
+    raw = raw.strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1:
+        return {"assessment": raw[:200], "recommendation": ""}
+    try:
+        data = _json2.loads(raw[start : end + 1])
+        return {
+            "assessment": str(data.get("assessment", ""))[:200],
+            "recommendation": str(data.get("recommendation", ""))[:200],
+        }
+    except Exception:
+        return {"assessment": raw[:200], "recommendation": ""}
 
 
 from src.agents.registry import AgentRegistry  # noqa: E402

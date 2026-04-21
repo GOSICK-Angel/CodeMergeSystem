@@ -37,6 +37,12 @@ from src.llm.prompts.judge_prompts import (
     build_re_evaluate_prompt,
     build_verdict_prompt,
 )
+from src.llm.prompts.meta_review_prompts import (
+    META_JUDGE_SYSTEM,
+    META_PLAN_SYSTEM,
+    build_meta_judge_review_prompt,
+    build_meta_plan_review_prompt,
+)
 from src.llm.prompts.memory_extractor_prompts import (
     MEMORY_EXTRACTOR_SYSTEM,
     build_extraction_prompt,
@@ -105,6 +111,14 @@ def _judge_system_constant(*_args: Any, **_kwargs: Any) -> str:
 
 def _memory_extractor_system_constant(*_args: Any, **_kwargs: Any) -> str:
     return MEMORY_EXTRACTOR_SYSTEM
+
+
+def _meta_plan_system_constant(*_args: Any, **_kwargs: Any) -> str:
+    return META_PLAN_SYSTEM
+
+
+def _meta_judge_system_constant(*_args: Any, **_kwargs: Any) -> str:
+    return META_JUDGE_SYSTEM
 
 
 # Planner (P-)
@@ -222,4 +236,28 @@ register_gate(
     "M-EXTRACT-INSIGHT",
     build_extraction_prompt,
     "MemoryExtractor user prompt: extract causal insights from phase events.",
+)
+
+# Coordinator Meta-Review — Plan (META-PLAN-)
+register_gate(
+    "META-PLAN-SYSTEM",
+    _meta_plan_system_constant,
+    "Coordinator meta-review system prompt for failed plan negotiation.",
+)
+register_gate(
+    "META-PLAN-REVIEW",
+    build_meta_plan_review_prompt,
+    "Coordinator meta-review user prompt: strategic assessment of plan impasse.",
+)
+
+# Coordinator Meta-Review — Judge (META-JUDGE-)
+register_gate(
+    "META-JUDGE-SYSTEM",
+    _meta_judge_system_constant,
+    "Coordinator meta-review system prompt for failed judge review cycle.",
+)
+register_gate(
+    "META-JUDGE-REVIEW",
+    build_meta_judge_review_prompt,
+    "Coordinator meta-review user prompt: strategic assessment of judge impasse.",
 )

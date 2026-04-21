@@ -8,6 +8,8 @@ inputs:
   - file_diffs
   - merge_base_commit
   - merge_plan
+  - plan_disputes
+  - plan_review_log
   - pollution_audit
   - shadow_conflicts
   - status
@@ -18,6 +20,8 @@ gates:
   - P-REVISION
   - P-EVAL-SYSTEM
   - P-EVALUATION
+  - META-PLAN-SYSTEM
+  - META-PLAN-REVIEW
 forbidden:
   - direct_llm_call
 collaboration: compute

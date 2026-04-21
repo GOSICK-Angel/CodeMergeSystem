@@ -47,6 +47,7 @@ from src.core.phases import (
     ReportGenerationPhase,
 )
 from src.core.phases.base import ActivityEvent, OnActivityCallback
+from src.core.coordinator import Coordinator
 from src.core.state_machine import StateMachine
 from src.memory.sqlite_store import SQLiteMemoryStore
 from src.memory.store import MemoryStore
@@ -146,6 +147,9 @@ class Orchestrator:
         self.memory_extractor = agent_map.get("memory_extractor")
 
         self._all_agents = list(agent_map.values())
+
+        # --- coordinator ---
+        self._coordinator = Coordinator(config)
 
         # --- memory ---
         self._memory_store = MemoryStore()
@@ -319,6 +323,7 @@ class Orchestrator:
                 "judge": self.judge,
                 "human_interface": self.human_interface,
             },
+            coordinator=self._coordinator,
         )
 
     def _emit(

@@ -4,6 +4,8 @@ inputs:
   - file_categories
   - file_decision_records
   - file_diffs
+  - judge_repair_rounds
+  - judge_verdicts_log
   - merge_base_commit
   - status
 output_schema: JudgeVerdict
@@ -13,6 +15,8 @@ gates:
   - J-VERDICT
   - J-BATCH-REVIEW
   - J-RE-EVALUATE
+  - META-JUDGE-SYSTEM
+  - META-JUDGE-REVIEW
 forbidden:
   - writes_state
   - direct_llm_call

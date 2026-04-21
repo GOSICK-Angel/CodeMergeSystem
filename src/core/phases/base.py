@@ -4,7 +4,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from src.models.config import MergeConfig
 from src.models.state import MergeState, SystemStatus
@@ -19,6 +19,10 @@ from src.memory.store import MemoryStore
 from src.memory.summarizer import PhaseSummarizer
 from src.core.hooks import HookManager
 from src.tools.cost_tracker import CostTracker
+
+# Forward reference — Coordinator is imported lazily to avoid circular imports.
+if TYPE_CHECKING:
+    from src.core.coordinator import Coordinator
 
 
 @dataclass(frozen=True)
@@ -57,6 +61,7 @@ class PhaseContext:
     hooks: HookManager = field(default_factory=HookManager)
     cost_tracker: CostTracker = field(default_factory=CostTracker)
     agents: dict[str, Any] = field(default_factory=dict)
+    coordinator: Coordinator | None = field(default=None)
 
     def notify(self, agent: str, action: str) -> None:
         if self.emit is not None:

@@ -19,6 +19,7 @@ from src.models.plan_review import (
     ReviewConclusion,
 )
 from src.models.dispute import PlanDisputeRequest
+from src.models.coordinator import MetaReviewResult
 from src.models.conflict import ConflictAnalysis
 from src.models.dependency import FileDependencyGraph
 
@@ -162,6 +163,8 @@ class MergeState(BaseModel):
     replayed_commits: list[str] = Field(default_factory=list)
     replayed_files: list[str] = Field(default_factory=list)
     merge_commit_log: list[dict[str, Any]] = Field(default_factory=list)
+
+    coordinator_directives: list[MetaReviewResult] = Field(default_factory=list)
 
     errors: list[dict[str, Any]] = Field(default_factory=list)
     messages: list[dict[str, Any]] = Field(default_factory=list)

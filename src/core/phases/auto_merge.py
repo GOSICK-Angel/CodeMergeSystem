@@ -609,6 +609,13 @@ class AutoMergePhase(Phase):
         planner = ctx.agents["planner"]
         planner_judge = ctx.agents["planner_judge"]
 
+        # Let Coordinator decide whether to attempt standard revision or meta-review.
+        if ctx.coordinator is not None:
+            decision = ctx.coordinator.route_dispute(state, dispute)
+            if decision.action == "meta_review":
+                await self._run_plan_meta_review(state, ctx, planner, decision.reason)
+                return
+
         try:
             ctx.state_machine.transition(
                 state,
@@ -649,3 +656,35 @@ class AutoMergePhase(Phase):
                 SystemStatus.AWAITING_HUMAN,
                 f"dispute handling error: {e}",
             )
+
+    async def _run_plan_meta_review(
+        self,
+        state: MergeState,
+        ctx: PhaseContext,
+        planner: object,
+        trigger_reason: str,
+    ) -> None:
+        from src.core.coordinator import Coordinator
+
+        logger.info("Coordinator: running plan meta-review (%s)", trigger_reason)
+        try:
+            raw = await planner.meta_review(state)  # type: ignore[union-attr]
+            if ctx.coordinator is not None:
+                result = Coordinator.build_meta_review_result(
+                    phase="auto_merge",
+                    trigger="plan_dispute",
+                    raw=raw,
+                )
+                state.coordinator_directives.append(result)
+                logger.info(
+                    "Plan meta-review: assessment=%r recommendation=%r",
+                    result.assessment,
+                    result.recommendation,
+                )
+        except Exception as exc:
+            logger.warning("Plan meta-review failed: %s", exc)
+        ctx.state_machine.transition(
+            state,
+            SystemStatus.AWAITING_HUMAN,
+            f"plan dispute escalated to meta-review: {trigger_reason}",
+        )

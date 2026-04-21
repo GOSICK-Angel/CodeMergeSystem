@@ -210,11 +210,24 @@ class JudgeReviewPhase(Phase):
                 memory_phase="judge_review",
             )
 
-        # No consensus after all dispute rounds → human decision
-        reason = (
-            f"judge verdict: no consensus after {state.judge_repair_rounds + 1} "
-            f"dispute rounds"
-        )
+        # No consensus after all dispute rounds → consult Coordinator
+        rounds_done = state.judge_repair_rounds + 1
+        if ctx.coordinator is not None:
+            decision = ctx.coordinator.route_judge_stall(state)
+            if decision.action == "meta_review":
+                await self._run_judge_meta_review(state, ctx, decision.reason)
+                reason = (
+                    f"judge stall escalated to meta-review after {rounds_done} rounds"
+                )
+                ctx.state_machine.transition(state, SystemStatus.AWAITING_HUMAN, reason)
+                return PhaseOutcome(
+                    target_status=SystemStatus.AWAITING_HUMAN,
+                    reason=reason,
+                    checkpoint_tag="after_phase5",
+                    memory_phase="judge_review",
+                )
+
+        reason = f"judge verdict: no consensus after {rounds_done} dispute rounds"
         ctx.state_machine.transition(state, SystemStatus.AWAITING_HUMAN, reason)
         return PhaseOutcome(
             target_status=SystemStatus.AWAITING_HUMAN,
@@ -222,6 +235,35 @@ class JudgeReviewPhase(Phase):
             checkpoint_tag="after_phase5",
             memory_phase="judge_review",
         )
+
+    async def _run_judge_meta_review(
+        self,
+        state: MergeState,
+        ctx: PhaseContext,
+        trigger_reason: str,
+    ) -> None:
+        from src.core.coordinator import Coordinator
+
+        judge = ctx.agents.get("judge")
+        if judge is None:
+            return
+        logger.info("Coordinator: running judge meta-review (%s)", trigger_reason)
+        try:
+            raw = await judge.meta_review(state)
+            if ctx.coordinator is not None:
+                result = Coordinator.build_meta_review_result(
+                    phase="judge_review",
+                    trigger="judge_stall",
+                    raw=raw,
+                )
+                state.coordinator_directives.append(result)
+                logger.info(
+                    "Judge meta-review: assessment=%r recommendation=%r",
+                    result.assessment,
+                    result.recommendation,
+                )
+        except Exception as exc:
+            logger.warning("Judge meta-review failed: %s", exc)
 
     async def _run_smoke_tests(self, state: MergeState, ctx: PhaseContext) -> None:
         """P1-3 Phase 5.5: run smoke tests after Judge PASS.

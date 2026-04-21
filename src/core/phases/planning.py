@@ -57,3 +57,7 @@ class PlanningPhase(Phase):
                 state.merge_plan,
                 state,
             )
+            if ctx.coordinator is not None:
+                state.merge_plan = ctx.coordinator.enforce_batch_limits(
+                    state.merge_plan
+                )

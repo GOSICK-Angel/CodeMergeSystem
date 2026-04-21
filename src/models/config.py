@@ -415,6 +415,35 @@ class MemoryExtractionConfig(BaseModel):
     min_judge_repair_rounds: int = Field(default=2, ge=1)
 
 
+class CoordinatorConfig(BaseModel):
+    judge_meta_review_threshold: int = Field(
+        default=2,
+        ge=1,
+        description="Judge repair rounds before Coordinator triggers meta-review.",
+    )
+    dispute_meta_review_threshold: int = Field(
+        default=2,
+        ge=1,
+        description="Plan dispute count before Coordinator triggers meta-review.",
+    )
+    context_utilization_ratio: float = Field(
+        default=0.6,
+        ge=0.1,
+        le=0.95,
+        description="Fraction of model context window to allocate per batch.",
+    )
+    max_files_per_batch: int | None = Field(
+        default=None,
+        description="Hard cap on files per batch. None = auto-computed from token budget.",
+    )
+    avg_tokens_per_file: int = Field(
+        default=2000,
+        ge=100,
+        description="Token estimate per file used in batch-size calculation.",
+    )
+    meta_review_enabled: bool = True
+
+
 class MergeConfig(BaseModel):
     upstream_ref: str = Field(
         ..., description="upstream branch ref, e.g. upstream/main"
@@ -485,6 +514,7 @@ class MergeConfig(BaseModel):
     )
     max_judge_repair_rounds: int = Field(default=3, ge=1, le=10)
     memory: MemoryExtractionConfig = Field(default_factory=MemoryExtractionConfig)
+    coordinator: CoordinatorConfig = Field(default_factory=CoordinatorConfig)
     max_dispute_rounds: int = Field(default=2, ge=1, le=5)
     max_batch_repair_rounds: int = Field(default=1, ge=1, le=3)
     parallel_file_concurrency: int | None = Field(

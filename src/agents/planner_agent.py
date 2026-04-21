@@ -996,10 +996,57 @@ class PlannerAgent(BaseAgent):
 
         return state.status in (SystemStatus.PLANNING, SystemStatus.PLAN_REVISING)
 
+    async def meta_review(self, state: MergeState) -> dict[str, str]:
+        """Meta-review: big-picture assessment of a failed plan negotiation.
+
+        Returns a dict with 'assessment' and 'recommendation' keys.
+        Uses META-PLAN-* gates so the call is contract-compliant.
+        """
+        from src.llm.prompts.gate_registry import get_gate
+
+        view = self.restricted_view(state)
+        disputes_raw = [
+            (d.model_dump() if hasattr(d, "model_dump") else dict(d))
+            for d in (view.plan_disputes or [])
+        ]
+        review_log_raw = [
+            (r.model_dump() if hasattr(r, "model_dump") else dict(r))
+            for r in (view.plan_review_log or [])
+        ]
+        system = get_gate("META-PLAN-SYSTEM").render()
+        prompt = get_gate("META-PLAN-REVIEW").render(
+            review_log_raw,
+            disputes_raw,
+            len(review_log_raw),
+        )
+        raw = await self._call_llm_with_retry(
+            [{"role": "user", "content": prompt}],
+            system=system,
+        )
+        return _parse_meta_review_json(str(raw))
+
     def _classify_file(self, file_diff: FileDiff, config: MergeConfig) -> RiskLevel:
         score = compute_risk_score(file_diff, config.file_classifier)
         updated = file_diff.model_copy(update={"risk_score": score})
         return classify_file(updated, config.file_classifier)
+
+
+def _parse_meta_review_json(raw: str) -> dict[str, str]:
+    import json
+
+    raw = raw.strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1:
+        return {"assessment": raw[:200], "recommendation": ""}
+    try:
+        data = json.loads(raw[start : end + 1])
+        return {
+            "assessment": str(data.get("assessment", ""))[:200],
+            "recommendation": str(data.get("recommendation", ""))[:200],
+        }
+    except Exception:
+        return {"assessment": raw[:200], "recommendation": ""}
 
 
 from src.agents.registry import AgentRegistry  # noqa: E402
