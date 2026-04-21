@@ -57,6 +57,20 @@ These are load-bearing design rules enforced by unit tests — do not violate th
 - **Plan revision limit** — when `plan_revision_rounds >= max_plan_revision_rounds`, transition to `AWAITING_HUMAN`, not `FAILED`
 - **Plan human review** — after PlannerJudge approves the plan, the system checks `pending_user_decisions`. If any files are `HUMAN_REQUIRED`, it transitions to `AWAITING_HUMAN` for human sign-off. If no files need human decisions (all files are auto-mergeable), the system skips `AWAITING_HUMAN` and transitions directly to `AUTO_MERGING`. For non-converged plans (MAX_ROUNDS / STALLED / LLM_FAILURE), `AWAITING_HUMAN` is always required. A `plan_review_<run_id>.md` report is generated regardless.
 
+## Agent Contracts
+
+Every agent that inherits from `BaseAgent` and opts in via `contract_name = "<name>"` has a yaml at `src/agents/contracts/<name>.yaml` that declares its input whitelist, output schema, allowed prompt gate IDs, forbidden behaviors, and collaboration pattern. See `src/agents/contracts/_schema.md` for the full spec.
+
+Prompts are registered in `src/llm/prompts/gate_registry.py` under stable IDs (`P-*`, `PJ-*`, `CA-*`, `E-*`, `J-*`). Agents must reference gates by ID rather than importing prompt builders directly; `tests/unit/test_agent_contracts.py` verifies that every contract-declared gate is registered.
+
+### Anti-Patterns (enforced by `tests/unit/test_agent_contracts.py`)
+
+1. **Writing state from reviewer agents** — `judge`, `planner_judge`, `human_interface` must never produce a left-hand `state.<field> = ...` assignment. Use `ReadOnlyStateView` (wrap via `self.restricted_view(state)`) and let the Orchestrator persist results.
+2. **Bypassing `BaseAgent._call_llm_with_retry`** — direct calls to `self.llm.complete(` / `self.llm.chat(` / `self.llm.generate(` are forbidden. The retry/error-classification/circuit-breaker layer must wrap every LLM call.
+3. **Silently filling missing LLM output fields with defaults** — when a model returns an incomplete structure, raise `ModelOutputError`; never substitute a default and proceed.
+4. **Referencing a prompt by importing its builder directly in an agent** — go through `get_gate("<ID>")`. Contracts must pre-declare which gate IDs the agent is allowed to invoke.
+5. **Accessing a `MergeState` field not in the agent's contract `inputs`** — when `self.restricted_view(state)` is used, out-of-contract reads raise `FieldNotInContract`. Add the field to the yaml explicitly if it is genuinely needed.
+
 ## Configuration
 
 Config is YAML-driven. Each agent has its own `AgentLLMConfig` (provider, model, `api_key_env`). The `agents` block in `MergeConfig` is the authoritative per-agent config; the top-level `llm` block is a legacy global default.

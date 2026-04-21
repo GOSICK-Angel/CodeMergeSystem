@@ -1,0 +1,17 @@
+name: conflict_analyst
+inputs:
+  - _merge_base
+  - config
+  - conflict_analyses
+  - file_diffs
+  - merge_plan
+  - status
+output_schema: ConflictAnalysis
+gates:
+  - CA-SYSTEM
+  - CA-THREE-WAY
+  - CA-COMMIT-ROUND
+forbidden:
+  - direct_llm_call
+collaboration: compute
+requires_human_options: false

@@ -1,0 +1,20 @@
+name: executor
+inputs:
+  - config
+  - current_phase
+  - file_decision_records
+  - file_diffs
+  - merge_plan
+  - plan_disputes
+  - sentinel_hits
+  - status
+output_schema: FileDecisionRecord
+gates:
+  - E-SYSTEM
+  - E-SEMANTIC-MERGE
+  - E-DELETION
+  - E-REBUTTAL
+forbidden:
+  - direct_llm_call
+collaboration: compute
+requires_human_options: false

@@ -36,13 +36,15 @@ logger = logging.getLogger(__name__)
 
 class ExecutorAgent(BaseAgent):
     agent_type = AgentType.EXECUTOR
+    contract_name = "executor"
 
     def __init__(self, llm_config: AgentLLMConfig, git_tool: GitTool | None = None):
         super().__init__(llm_config)
         self.git_tool = git_tool
 
     async def run(self, state: MergeState) -> AgentMessage:
-        if state.merge_plan is None:
+        view = self.restricted_view(state)
+        if view.merge_plan is None:
             return AgentMessage(
                 sender=AgentType.EXECUTOR,
                 receiver=AgentType.ORCHESTRATOR,
@@ -56,16 +58,16 @@ class ExecutorAgent(BaseAgent):
         disputes: list[str] = []
 
         file_diffs_map: dict[str, FileDiff] = {}
-        for fd in state.file_diffs:
+        for fd in view.file_diffs:
             file_diffs_map[fd.file_path] = fd
 
         from src.tools.sentinel_scanner import SentinelScanner
 
         sentinel_scanner = SentinelScanner.from_config_extras(
-            list(getattr(state.config, "sentinels_extra", None) or [])
+            list(getattr(view.config, "sentinels_extra", None) or [])
         )
 
-        for batch in state.merge_plan.phases:
+        for batch in view.merge_plan.phases:
             if batch.risk_level not in (RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY):
                 continue
 
@@ -86,7 +88,7 @@ class ExecutorAgent(BaseAgent):
                     and self.git_tool is not None
                 ):
                     fork_content = self.git_tool.get_file_content(
-                        state.config.fork_ref, file_path
+                        view.config.fork_ref, file_path
                     )
                     if fork_content:
                         hits = sentinel_scanner.scan(fork_content, file_path)

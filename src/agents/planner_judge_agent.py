@@ -17,18 +17,20 @@ from src.llm.response_parser import parse_plan_judge_verdict
 
 class PlannerJudgeAgent(BaseAgent):
     agent_type = AgentType.PLANNER_JUDGE
+    contract_name = "planner_judge"
 
     def __init__(self, llm_config: AgentLLMConfig):
         super().__init__(llm_config)
 
     async def run(self, state: MergeState) -> AgentMessage:
-        if state.merge_plan is None:
+        view = self.restricted_view(state)
+        if view.merge_plan is None:
             raise ValueError("No merge plan to review")
 
-        file_diffs: list[FileDiff] = state.file_diffs
+        file_diffs: list[FileDiff] = view.file_diffs
 
-        lang = state.config.output.language
-        verdict = await self.review_plan(state.merge_plan, file_diffs, 0, lang=lang)
+        lang = view.config.output.language
+        verdict = await self.review_plan(view.merge_plan, file_diffs, 0, lang=lang)
 
         return AgentMessage(
             sender=AgentType.PLANNER_JUDGE,

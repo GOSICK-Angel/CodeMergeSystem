@@ -1,0 +1,20 @@
+name: judge
+inputs:
+  - config
+  - file_categories
+  - file_decision_records
+  - file_diffs
+  - merge_base_commit
+  - status
+output_schema: JudgeVerdict
+gates:
+  - J-SYSTEM
+  - J-FILE-REVIEW
+  - J-VERDICT
+  - J-BATCH-REVIEW
+  - J-RE-EVALUATE
+forbidden:
+  - writes_state
+  - direct_llm_call
+collaboration: review_only
+requires_human_options: false

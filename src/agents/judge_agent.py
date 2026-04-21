@@ -40,12 +40,14 @@ from src.tools.syntax_checker import check_syntax as check_file_syntax
 
 class JudgeAgent(BaseAgent):
     agent_type = AgentType.JUDGE
+    contract_name = "judge"
 
     def __init__(self, llm_config: AgentLLMConfig, git_tool: GitTool | None = None):
         super().__init__(llm_config)
         self.git_tool = git_tool
 
     async def run(self, state: ReadOnlyStateView) -> AgentMessage:
+        state = self.restricted_view(state)
         all_issues: list[JudgeIssue] = []
         reviewed_files: list[str] = []
 

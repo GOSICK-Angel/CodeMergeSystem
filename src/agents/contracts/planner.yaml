@@ -1,0 +1,24 @@
+name: planner
+inputs:
+  - _merge_base
+  - config
+  - config_drifts
+  - file_categories
+  - file_classifications
+  - file_diffs
+  - merge_base_commit
+  - merge_plan
+  - pollution_audit
+  - shadow_conflicts
+  - status
+output_schema: MergePlan
+gates:
+  - P-SYSTEM
+  - P-CLASSIFICATION
+  - P-REVISION
+  - P-EVAL-SYSTEM
+  - P-EVALUATION
+forbidden:
+  - direct_llm_call
+collaboration: compute
+requires_human_options: false

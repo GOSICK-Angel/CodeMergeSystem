@@ -1,0 +1,12 @@
+name: human_interface
+inputs:
+  - human_decision_requests
+  - status
+output_schema: AgentMessage
+gates: []
+forbidden:
+  - writes_state
+  - direct_llm_call
+  - fills_missing_fields_with_defaults
+collaboration: propose_then_confirm
+requires_human_options: true

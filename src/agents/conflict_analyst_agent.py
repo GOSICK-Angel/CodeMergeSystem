@@ -17,15 +17,17 @@ from src.tools.git_tool import GitTool
 
 class ConflictAnalystAgent(BaseAgent):
     agent_type = AgentType.CONFLICT_ANALYST
+    contract_name = "conflict_analyst"
 
     def __init__(self, llm_config: AgentLLMConfig, git_tool: GitTool | None = None):
         super().__init__(llm_config)
         self.git_tool = git_tool
 
     async def run(self, state: MergeState) -> AgentMessage:
+        view = self.restricted_view(state)
         results: dict[str, ConflictAnalysis] = {}
 
-        if state.merge_plan is None:
+        if view.merge_plan is None:
             return AgentMessage(
                 sender=AgentType.CONFLICT_ANALYST,
                 receiver=AgentType.ORCHESTRATOR,
@@ -36,14 +38,14 @@ class ConflictAnalystAgent(BaseAgent):
             )
 
         high_risk_files: list[str] = []
-        for batch in state.merge_plan.phases:
+        for batch in view.merge_plan.phases:
             from src.models.diff import RiskLevel
 
             if batch.risk_level in (RiskLevel.HUMAN_REQUIRED, RiskLevel.AUTO_RISKY):
                 high_risk_files.extend(batch.file_paths)
 
         file_diffs_map: dict[str, FileDiff] = {}
-        for fd in state.file_diffs:
+        for fd in view.file_diffs:
             file_diffs_map[fd.file_path] = fd
 
         for file_path in high_risk_files:
@@ -52,12 +54,12 @@ class ConflictAnalystAgent(BaseAgent):
                 continue
 
             base_content = target_content = current_content = None
-            if self.git_tool and hasattr(state, "_merge_base"):
+            if self.git_tool and hasattr(view, "_merge_base"):
                 base_content, current_content, target_content = (
                     self.git_tool.get_three_way_diff(
-                        state._merge_base or "",
-                        state.config.fork_ref,
-                        state.config.upstream_ref,
+                        view._merge_base or "",
+                        view.config.fork_ref,
+                        view.config.upstream_ref,
                         file_path,
                     )
                 )
@@ -67,7 +69,7 @@ class ConflictAnalystAgent(BaseAgent):
                 base_content=base_content,
                 current_content=current_content,
                 target_content=target_content,
-                project_context=state.config.project_context,
+                project_context=view.config.project_context,
             )
             results[file_path] = analysis
 

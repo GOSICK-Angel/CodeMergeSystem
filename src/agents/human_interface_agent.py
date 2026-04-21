@@ -13,11 +13,13 @@ from src.tools.conflict_grouper import ConflictGroup
 
 class HumanInterfaceAgent(BaseAgent):
     agent_type = AgentType.HUMAN_INTERFACE
+    contract_name = "human_interface"
 
     def __init__(self, llm_config: AgentLLMConfig):
         super().__init__(llm_config)
 
     async def run(self, state: MergeState) -> AgentMessage:
+        state = self.restricted_view(state)
         pending = [
             req
             for req in state.human_decision_requests.values()

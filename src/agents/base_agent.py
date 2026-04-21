@@ -90,6 +90,7 @@ class RetryBudget:
 
 class BaseAgent(ABC):
     agent_type: AgentType
+    contract_name: str | None = None
 
     def __init__(self, llm_config: AgentLLMConfig):
         self.llm_config = llm_config
@@ -102,6 +103,64 @@ class BaseAgent(ABC):
         self._cost_tracker: CostTracker | None = None
         self._current_phase: str = ""
         self._hooks: HookManager | None = None
+        self._contract: Any | None = None
+
+    @property
+    def contract(self) -> Any | None:
+        """Lazily load the agent's behavioral contract, if declared.
+
+        Returns None for agents that haven't opted in (contract_name unset).
+        Loading failures surface as exceptions on first access.
+        """
+        if self.contract_name is None:
+            return None
+        if self._contract is None:
+            from src.agents.contract import load_contract
+
+            self._contract = load_contract(self.contract_name)
+        return self._contract
+
+    def restricted_view(self, state: Any) -> Any:
+        """Wrap *state* with a contract-restricted ReadOnlyStateView.
+
+        Returns *state* unchanged when the agent has no contract.  When the
+        agent has a contract:
+
+        * if *state* is already a restricted view matching this contract, it
+          is returned unchanged;
+        * if *state* is an unrestricted ``ReadOnlyStateView``, it is re-wrapped
+          from its underlying state with the contract whitelist applied;
+        * otherwise (plain MergeState), it is wrapped with ``restricted()``.
+
+        Reads of attributes not in ``contract.inputs`` raise
+        :class:`FieldNotInContract`.
+        """
+        contract = self.contract
+        if contract is None:
+            return state
+        from src.core.read_only_state_view import ReadOnlyStateView
+
+        allowed = set(contract.inputs)
+        if isinstance(state, ReadOnlyStateView):
+            existing_allowed = object.__getattribute__(state, "_allowed_fields")
+            existing_contract = object.__getattribute__(state, "_contract_name")
+            if (
+                existing_allowed is not None
+                and existing_contract == contract.name
+                and set(existing_allowed) == allowed
+            ):
+                return state
+            inner = object.__getattribute__(state, "_state")
+            return ReadOnlyStateView.restricted(
+                inner,
+                allowed_fields=allowed,
+                contract_name=contract.name,
+            )
+        return ReadOnlyStateView.restricted(
+            state,
+            allowed_fields=allowed,
+            contract_name=contract.name,
+        )
 
     def set_trace_logger(self, trace_logger: TraceLogger) -> None:
         self._trace_logger = trace_logger

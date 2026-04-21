@@ -1,0 +1,14 @@
+name: planner_judge
+inputs:
+  - merge_plan
+  - file_diffs
+  - config
+output_schema: PlanJudgeVerdict
+gates:
+  - PJ-SYSTEM
+  - PJ-PLAN-REVIEW
+forbidden:
+  - writes_state
+  - direct_llm_call
+collaboration: review_only
+requires_human_options: false

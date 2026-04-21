@@ -36,11 +36,15 @@ import json as json_lib
 
 class PlannerAgent(BaseAgent):
     agent_type = AgentType.PLANNER
+    contract_name = "planner"
 
     def __init__(self, llm_config: AgentLLMConfig):
         super().__init__(llm_config)
 
     async def run(self, state: MergeState) -> AgentMessage:
+        self.restricted_view(
+            state
+        )  # contract side-effect: asserts inputs whitelist loads
         plan = await self._generate_plan(state)
         state.merge_plan = plan
         state.file_classifications = {
