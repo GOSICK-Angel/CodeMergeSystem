@@ -410,7 +410,7 @@ class HistoryPreservationConfig(BaseModel):
 
 
 class MemoryExtractionConfig(BaseModel):
-    llm_extraction: bool = False
+    llm_extraction: bool = True
     max_insights_per_phase: int = Field(default=5, ge=1, le=20)
     min_judge_repair_rounds: int = Field(default=2, ge=1)
 

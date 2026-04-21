@@ -175,7 +175,7 @@ collaboration: review_only   # compute / review_only / propose_then_confirm
 
 ### 4.8 `MemoryExtractorAgent`（`memory_extractor_agent.py`）
 
-- 默认关闭（`config.memory.llm_extraction: false`）
+- 默认开启（`config.memory.llm_extraction:  true`）
 - 在确定性规则提取完成后，对"高信息量事件"追加 LLM 提炼：
   - `state.errors` 非空（任意 Phase）
   - `state.plan_disputes` 非空（planning 结束后）

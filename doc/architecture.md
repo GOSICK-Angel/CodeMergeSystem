@@ -350,7 +350,7 @@ MergeConfig
 │   ├── sync_detection_threshold #   触发检测的最小 sync_ratio（默认 0.3）
 │   └── min_synced_files         #   最少已同步文件数（默认 5，防假阳性）
 ├── memory                       # MemoryExtractionConfig
-│   ├── llm_extraction           #   LLM 辅助记忆提炼开关（默认 false）
+│   ├── llm_extraction           #   LLM 辅助记忆提炼开关（默认 true）
 │   ├── max_insights_per_phase   #   每 Phase 最多提炼条数（默认 5）
 │   └── min_judge_repair_rounds  #   触发提炼的 Judge 最少修复轮次（默认 2）
 ├── coordinator                  # CoordinatorConfig
