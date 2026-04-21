@@ -1,7 +1,7 @@
 # Agents（`src/agents/`）
 
-> **版本**：2026-04-17
-> 共 7 个 Agent + 1 基类 + 1 Registry。Orchestrator 只依赖 Registry，Agent 之间不直接互调。
+> **版本**：2026-04-21
+> 共 9 个 Agent + 1 基类 + 1 Registry。Orchestrator 只依赖 Registry，Agent 之间不直接互调。
 
 ---
 
@@ -16,6 +16,7 @@
 | Judge | `judge_agent.py` | Claude Opus | 审查合并结果 | ❌（只读） |
 | HumanInterface | `human_interface_agent.py` | Claude Haiku | 人工决策模板/汇总 | ❌ |
 | SmokeTest | `smoke_test_agent.py` | — | 执行冒烟测试（P1-3） | ❌ |
+| MemoryExtractor | `memory_extractor_agent.py` | Claude Haiku | LLM 辅助记忆提炼（默认关闭） | ❌ |
 
 **Reviewer-Executor Provider 隔离**：审查类 Agent（Judge、PlannerJudge）故意用与 Executor 不同的 LLM 提供商，防止共谋偏差。
 
@@ -75,7 +76,37 @@ agents = AgentRegistry.create_all(config, git_tool=self.git_tool)
 
 ---
 
-## 4. 七个具体 Agent
+## 3.5 Agent Contract（`src/agents/contracts/`）
+
+每个核心 Agent 配一份 YAML 格式"岗位说明书"，集中声明四件事，防止行为漂移：
+
+```yaml
+name: judge
+inputs:          # 允许读取的 MergeState 字段白名单
+  - config
+  - file_decision_records
+  - judge_verdicts_log
+  ...
+output_schema: JudgeVerdict   # 输出 Pydantic 类名
+gates:           # 允许调用的 Prompt Gate ID（从 gate_registry.py 中选）
+  - J-SYSTEM
+  - J-FILE-REVIEW
+  - META-JUDGE-REVIEW
+  ...
+forbidden:       # 绝对禁止的行为
+  - writes_state       # 不得修改 state 字段
+  - direct_llm_call    # 必须走 _call_llm_with_retry
+collaboration: review_only   # compute / review_only / propose_then_confirm
+```
+
+**执行机制**：
+- 运行时：`BaseAgent.restricted_view(state)` 返回 `ReadOnlyStateView`，访问不在 `inputs` 中的字段抛 `FieldNotInContract`
+- 静态扫描：`tests/unit/test_agent_contracts.py` 对每个 Agent 文件 AST 扫描，检测 `state.<field> =`（writes_state）和 `self.llm.complete(`（direct_llm_call）
+- Prompt Gate：所有 prompt 函数集中注册在 `src/llm/prompts/gate_registry.py`（`register_gate(id, builder, desc)`），Agent 代码只引用 ID，不内联原文
+
+---
+
+## 4. 九个具体 Agent
 
 ### 4.1 `PlannerAgent`（`planner_agent.py`, 1003 LOC，最复杂）
 
@@ -88,6 +119,7 @@ agents = AgentRegistry.create_all(config, git_tool=self.git_tool)
 - **HUMAN_REQUIRED 强制**：`security_sensitive.patterns` 命中的文件一律 HUMAN_REQUIRED
 - **修订模式**：`revision_request` 参数携带 PlannerJudge 的 issues，驱动定向修订
 - **Plan Dispute 响应**：处理 Executor 发来的 `PlanDisputeRequest`，调整 Plan
+- **Meta-review**：`meta_review(state)` 在 Coordinator 路由决策要求时调用，换 `META-PLAN-*` 提示从大局视角诊断计划僵局，输出 assessment + recommendation
 
 ### 4.2 `PlannerJudgeAgent`（`planner_judge_agent.py`, 98 LOC）
 
@@ -127,6 +159,7 @@ agents = AgentRegistry.create_all(config, git_tool=self.git_tool)
    - 生成 `JudgeVerdict`：APPROVED / NEEDS_REPAIR / ESCALATE
 
 - 只读：接收 `ReadOnlyStateView`
+- **Meta-review**：`meta_review(state)` 在 Coordinator 路由决策要求时调用，换 `META-JUDGE-*` 提示从大局视角诊断审查僵局，结果写入 `state.coordinator_directives`
 
 ### 4.6 `HumanInterfaceAgent`（`human_interface_agent.py`, 402 LOC）
 
@@ -139,6 +172,17 @@ agents = AgentRegistry.create_all(config, git_tool=self.git_tool)
 - 薄包装：把 `SmokeTestConfig.suites` 交给 `smoke_runner` 跑
 - 产出 `SmokeTestReport` 挂到 state
 - Judge Review Phase 在 LLM 审查通过后才调用
+
+### 4.8 `MemoryExtractorAgent`（`memory_extractor_agent.py`）
+
+- 默认关闭（`config.memory.llm_extraction: false`）
+- 在确定性规则提取完成后，对"高信息量事件"追加 LLM 提炼：
+  - `state.errors` 非空（任意 Phase）
+  - `state.plan_disputes` 非空（planning 结束后）
+  - `judge_repair_rounds ≥ min_judge_repair_rounds`（judge_review 结束后）
+- 输出标准 `MemoryEntry`（`confidence_level="inferred"`），走 `content_hash` 去重路径
+- 模型：默认 `claude-haiku-4-5-20251001`（成本控制）；每 Phase 最多 `max_insights_per_phase`（默认 5）条
+- 通过 contract `memory_extractor.yaml` 约束输入白名单（`errors / plan_disputes / judge_verdicts_log / judge_repair_rounds`）
 
 ---
 
@@ -175,14 +219,17 @@ Report Generation
 
 ## 6. 开发新 Agent 的清单
 
-1. 在 `src/agents/your_agent.py` 继承 `BaseAgent`
+1. 在 `src/agents/your_agent.py` 继承 `BaseAgent`，设置 `agent_type` 和 `contract_name`
 2. 定义 `async def run(...)`，返回 Pydantic 模型
-3. 如需 `git_tool` 等额外依赖，在类末尾：
+3. 创建 `src/agents/contracts/your_agent.yaml`（输入白名单 / gate 白名单 / forbidden 规则）
+4. 在 `src/llm/prompts/gate_registry.py` 中注册新 Gate（`register_gate("YA-SYSTEM", builder, desc)`）
+5. 在类末尾：
    ```python
    AgentRegistry.register("your_agent", YourAgent, extra_kwargs=["git_tool"])
    ```
-4. 在 `src/core/orchestrator.py` 顶部 `import src.agents.your_agent  # noqa: F401`
-5. 在 `AgentsLLMConfig` 中为它加默认 `AgentLLMConfig`
-6. 决定 Agent 接入哪个 Phase（改 `src/core/phases/*.py`）
-7. 在 `config/default.yaml` 中提供示例配置
-8. 写单元测试：`tests/unit/test_your_agent.py`，用 `patch_llm_factory` mock 掉真实 LLM
+6. 在 `src/core/orchestrator.py` 顶部 `import src.agents.your_agent  # noqa: F401`
+7. 在 `AgentsLLMConfig` 中为它加默认 `AgentLLMConfig`
+8. 在 `MergeConfig` 末尾加对应配置字段（若需要）
+9. 决定 Agent 接入哪个 Phase（改 `src/core/phases/*.py`）
+10. 写单元测试：`tests/unit/test_your_agent.py`，用 `patch_llm_factory` mock 掉真实 LLM
+11. contract 测试自动生效（`test_agent_contracts.py` 会扫描所有 `contracts/*.yaml`）

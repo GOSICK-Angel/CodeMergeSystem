@@ -1,7 +1,7 @@
 # 执行流程与状态机
 
 > **对应代码**：`src/core/state_machine.py`、`src/core/orchestrator.py`、`src/core/phases/*.py`
-> **版本**：2026-04-17
+> **版本**：2026-04-21
 
 本文档描述系统运行时的状态机、Phase 之间的调度关系，以及人工决策与恢复的交互时序。
 
@@ -67,7 +67,7 @@ class Phase(ABC):
     async def run(state, ctx)       # 串联上述三步，Orchestrator 调用它
 ```
 
-`PhaseContext` 是只读的依赖容器：`config / git_tool / gate_runner / state_machine / message_bus / checkpoint / phase_runner / memory_store / summarizer / trace_logger / emit / hooks / cost_tracker / agents`。
+`PhaseContext` 是只读的依赖容器：`config / git_tool / gate_runner / state_machine / message_bus / checkpoint / phase_runner / memory_store / summarizer / trace_logger / emit / hooks / cost_tracker / agents / coordinator`。其中 `coordinator: Coordinator | None` 供 Phase 咨询异常路由决策（见 §4 各 Phase 详细描述）。
 
 `PhaseOutcome` 告诉 Orchestrator 下一步：
 
@@ -95,7 +95,7 @@ while state.status in PHASE_MAP and state.status not in _TERMINAL:
     outcome = await phase.run(state, ctx)
     await hooks.emit("phase:after", ...)
     if outcome.should_update_memory:
-        self._update_memory(outcome.memory_phase, state)
+        await self._update_memory(outcome.memory_phase, state)
     if outcome.should_checkpoint:
         self.checkpoint.save(state, outcome.checkpoint_tag)
     if outcome.extra.get("paused"):
@@ -150,6 +150,7 @@ while state.status in PHASE_MAP and state.status not in _TERMINAL:
 ### Phase 1 — Planning (`phases/planning.py`)
 
 薄层包装：调用 `planner_agent.run()` 生成 `MergePlan`，挂到 `state.merge_plan` → PLAN_REVIEWING。
+`after()` 钩子在 Guardrail 检查之后，调用 `ctx.coordinator.enforce_batch_limits(plan)`，将超出 `context_utilization_ratio × context_window ÷ avg_tokens_per_file` 上限的 `PhaseFileBatch` 自动拆分为多个子批次，防止单批次超出 LLM 注意力范围。
 
 ### Phase 2 — Plan Review (`phases/plan_review.py`)
 
@@ -252,6 +253,9 @@ for dispute_round in 0..max_dispute_rounds:
 
 - 每层通过子审查后，运行该层 `gate_commands`；连续失败 ≥ `max_consecutive_failures` → AWAITING_HUMAN
 - Executor 发现计划不合理 → `raise_plan_dispute()` → PLAN_DISPUTE_PENDING
+
+**Plan Dispute 路由（Coordinator 介入）**：AutoMergePhase 在进入标准修订流程前，先调用 `ctx.coordinator.route_dispute(state, dispute)` 获取路由决策：若历史 dispute 数量达到 `dispute_meta_review_threshold`，Coordinator 指示 meta-review；Planner 换 `META-PLAN-*` 提示进行大局审查，结果写入 `state.coordinator_directives`，然后直接转 AWAITING_HUMAN 向用户展示战略建议。
+
 - 全部层完成且无 dispute，运行 `GitCommitter.commit_phase_changes()`（受 `history.commit_after_phase` 控制）：
 
 ```
@@ -319,7 +323,9 @@ for round in 0..max_dispute_rounds:
 #### 6.3 最终路由
 
 - `verdict.approved` → 跑 smoke tests（如启用）→ GENERATING_REPORT
-- 超出协商轮数仍无共识 → AWAITING_HUMAN（人工最终裁决）
+- 超出协商轮数仍无共识 → 先咨询 `ctx.coordinator.route_judge_stall(state)`：
+  - `action="meta_review"`：Judge 调用 `meta_review()` 换 `META-JUDGE-*` 提示做大局审查，结果追加到 `state.coordinator_directives`，然后转 AWAITING_HUMAN
+  - `action="escalate_human"`：直接 → AWAITING_HUMAN（经典路径，`meta_review_enabled=false` 或未达阈值时）
 
 ### Phase 7 — Report Generation (`phases/report_generation.py`)
 
