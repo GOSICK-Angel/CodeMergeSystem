@@ -517,6 +517,18 @@ class MergeConfig(BaseModel):
     coordinator: CoordinatorConfig = Field(default_factory=CoordinatorConfig)
     max_dispute_rounds: int = Field(default=2, ge=1, le=5)
     max_batch_repair_rounds: int = Field(default=1, ge=1, le=3)
+    chunk_size_chars: int = Field(
+        default=20000,
+        ge=5000,
+        description="Files larger than this threshold (in chars) are split into "
+        "semantic chunks for LLM merge instead of being processed in one call.",
+    )
+    customization_path_patterns: list[str] = Field(
+        default_factory=list,
+        description="Glob patterns for files that have local customizations. "
+        "Judge uses 'customization_preserved' strategy for these files instead of "
+        "'upstream_match'. Example: ['custom/**', '**/local_overrides/**'].",
+    )
     parallel_file_concurrency: int | None = Field(
         default=None,
         ge=1,

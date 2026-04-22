@@ -7,11 +7,12 @@ from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage, MessageType
 from src.models.plan import MergePhase
 from src.models.diff import FileDiff, RiskLevel
-from src.models.decision import FileDecisionRecord
+from src.models.decision import FileDecisionRecord, MergeDecision
 from src.models.judge import (
     BatchVerdict,
     DisputePoint,
     ExecutorRebuttal,
+    JudgeCheckStrategy,
     JudgeVerdict,
     JudgeIssue,
     RepairInstruction,
@@ -83,12 +84,18 @@ class JudgeAgent(BaseAgent):
                 abs_path = self.git_tool.repo_path / file_path
                 if abs_path.exists():
                     merged_content = _safe_read_text(abs_path) or ""
+            check_strategy = _resolve_check_strategy(
+                file_path,
+                record,
+                state.config.customization_path_patterns,
+            )
             return await self.review_file(
                 file_path,
                 merged_content,
                 record,
                 fd,
                 project_context=state.config.project_context,
+                check_strategy=check_strategy,
             )
 
         runner = ParallelFileRunner.from_api_key_env_list(
@@ -124,6 +131,7 @@ class JudgeAgent(BaseAgent):
         decision_record: FileDecisionRecord,
         original_diff: FileDiff,
         project_context: str = "",
+        check_strategy: JudgeCheckStrategy = JudgeCheckStrategy.UPSTREAM_MATCH,
     ) -> list[JudgeIssue]:
         issues: list[JudgeIssue] = []
 
@@ -171,6 +179,7 @@ class JudgeAgent(BaseAgent):
             project_context,
             max_content_chars=max_content_chars,
             memory_context=memory_context,
+            check_strategy=check_strategy,
         )
         messages = [{"role": "user", "content": prompt}]
 
@@ -1173,6 +1182,19 @@ def _extract_diff_ranges(original_diff: FileDiff) -> list[tuple[int, int]]:
             (1, original_diff.lines_added + original_diff.lines_deleted + 100)
         )
     return ranges
+
+
+def _resolve_check_strategy(
+    file_path: str,
+    record: FileDecisionRecord,
+    customization_patterns: list[str],
+) -> JudgeCheckStrategy:
+    for pattern in customization_patterns:
+        if fnmatch.fnmatch(file_path, pattern):
+            return JudgeCheckStrategy.CUSTOMIZATION_PRESERVED
+    if record.decision == MergeDecision.SEMANTIC_MERGE:
+        return JudgeCheckStrategy.CUSTOMIZATION_PRESERVED
+    return JudgeCheckStrategy.UPSTREAM_MATCH
 
 
 def _parse_meta_review_json(raw: str) -> dict[str, str]:

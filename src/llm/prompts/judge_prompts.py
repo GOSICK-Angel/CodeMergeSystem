@@ -1,5 +1,10 @@
+from typing import Any, TYPE_CHECKING
+
 from src.models.diff import FileDiff
 from src.models.decision import FileDecisionRecord
+
+if TYPE_CHECKING:
+    from src.models.judge import JudgeCheckStrategy
 
 _DEFAULT_MAX_CONTENT_CHARS = 5000
 
@@ -17,6 +22,29 @@ def _memory_section(memory_context: str) -> str:
     return f"\n{memory_context}\n\n"
 
 
+_UPSTREAM_MATCH_TASKS = """\
+1. Check for remaining conflict markers (<<<<<<, =======, >>>>>>>)
+2. Check that the merged result matches the upstream version — no upstream features missing
+3. Check for any obvious errors or missing logic introduced during merge"""
+
+_CUSTOMIZATION_PRESERVED_TASKS = """\
+1. Check for remaining conflict markers (<<<<<<, =======, >>>>>>>)
+2. Check that fork-specific customisations (added logic, extended interfaces, \
+local business rules) are fully preserved and not overwritten
+3. Check that upstream additions/changes are correctly integrated alongside the \
+fork customisations — neither side silently dropped
+4. Check for any obvious errors or inconsistencies caused by the merge"""
+
+
+def _review_tasks_section(check_strategy: "JudgeCheckStrategy | None") -> str:
+    if check_strategy is not None:
+        from src.models.judge import JudgeCheckStrategy as _S
+
+        if check_strategy == _S.CUSTOMIZATION_PRESERVED:
+            return _CUSTOMIZATION_PRESERVED_TASKS
+    return _UPSTREAM_MATCH_TASKS
+
+
 JUDGE_SYSTEM = """You are an independent reviewer of code merge results. Your task is to verify whether
 the merge result preserves all private logic of the fork branch and correctly introduces all changes from the upstream branch.
 You do not know the Executor's decision process; you only look at the final merge result and the original diff,
@@ -31,6 +59,7 @@ def build_file_review_prompt(
     project_context: str = "",
     max_content_chars: int | None = None,
     memory_context: str = "",
+    check_strategy: "JudgeCheckStrategy | None" = None,
 ) -> str:
     language = original_diff.language or "unknown"
     decision_val = (
@@ -69,10 +98,12 @@ Language: {language}
 ```
 {_memory_section(memory_context)}
 # Review Tasks
-1. Check for remaining conflict markers (<<<<<<, =======, >>>>>>>)
-2. Check if fork's private logic is preserved
-3. Check if upstream's key features are incorporated
-4. Check for any obvious errors or missing logic
+{_review_tasks_section(check_strategy)}
+
+For each issue also set "resolvability":
+- "fixable": can be resolved by re-running or applying a targeted fix (e.g. wrong merge decision, B-class file differs from upstream)
+- "system_limitation": a known system boundary that cannot be auto-fixed (e.g. D-missing file skipped due to unsatisfied layer deps, unsupported merge strategy)
+- "human_required": needs manual human intervention (e.g. escalate_human file with complex conflicts, ambiguous business logic)
 
 Return JSON:
 {{
@@ -84,7 +115,8 @@ Return JSON:
       "description": "Specific issue description",
       "affected_lines": [],
       "suggested_fix": "How to fix this issue",
-      "must_fix_before_merge": true
+      "must_fix_before_merge": true,
+      "resolvability": "fixable | system_limitation | human_required"
     }}
   ],
   "overall_assessment": "Brief overall quality assessment",
@@ -130,7 +162,7 @@ _BATCH_PER_FILE_CONTENT_CHARS = 2000
 
 
 def build_batch_file_review_prompt(
-    file_reviews: list[dict],
+    file_reviews: list[dict[str, Any]],
     project_context: str = "",
 ) -> str:
     sections: list[str] = []
@@ -164,6 +196,11 @@ def build_batch_file_review_prompt(
 
 For each file check: conflict markers, fork logic preserved, upstream changes present.
 
+For each issue set "resolvability":
+- "fixable": can be resolved by re-running or applying a targeted fix
+- "system_limitation": known system boundary (D-missing skipped, unsupported strategy)
+- "human_required": needs manual human intervention
+
 Return JSON:
 {
   "files": [
@@ -176,7 +213,8 @@ Return JSON:
           "description": "Specific issue description",
           "affected_lines": [],
           "suggested_fix": "How to fix",
-          "must_fix_before_merge": true
+          "must_fix_before_merge": true,
+          "resolvability": "fixable | system_limitation | human_required"
         }
       ]
     }

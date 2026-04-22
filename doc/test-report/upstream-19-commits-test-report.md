@@ -4,7 +4,7 @@
 **Run ID**: `dcdf1729-75f9-4fe4-9aa6-84f79349e9f5`  
 **合并目标**: `dify-official-plugins` — `test/upstream-19-commits` → `feat_merge`  
 **测试人**: Angel (同时作为用户进行人工决策)
-
+**仓库标准**：标准：manifest.yaml中author:cvte的插件为存在二次开发的，合并时应注意冲突解决，针对/Users/angel/Desktop/WA_AI/project/dify-official-plugins/models 中author: cvte的插件 dify-api 存在模型托管，合并时也应当注意冲突解决，author不是cvte的插件均直接采用远端分支修改，使用该仓库测试当前项目全流程
 ---
 
 ## 执行摘要
@@ -106,25 +106,27 @@
 
 **13 个人工决策文件**（用户身份）:
 
-| 文件 | 判断依据 | 决定 |
-|------|----------|------|
-| `models/azure_openai/provider/azure_openai.yaml` | cvte 插件，但 upstream 新增 Entra ID auth 有价值 | take_target |
-| `models/tongyi/manifest.yaml` | cvte 插件，upstream 要改 author 回 langgenius | take_current（保留 cvte） |
-| `agent-strategies/cot_agent/strategies/ReAct.py` | langgenius 插件 | take_target |
-| `agent-strategies/cot_agent/strategies/function_calling.py` | langgenius 插件 | take_target |
-| `models/bedrock/manifest.yaml` | langgenius，版本升级 0.0.54→0.0.58 | take_target |
-| `models/bedrock/utils/inference_profile.py` | langgenius | take_target |
-| `models/ollama/manifest.yaml` | langgenius | take_target |
-| `tools/jira/provider/jira.yaml` | langgenius | take_target |
-| `tools/paddleocr/manifest.yaml` | langgenius，版本升级 0.1.3→0.1.4 | take_target |
-| `tools/paddleocr/tools/document_parsing.py` | langgenius | take_target |
-| `tools/paddleocr/tools/document_parsing_vl.py` | langgenius | take_target |
-| `tools/paddleocr/tools/text_recognition.py` | langgenius | take_target |
-| `tools/paddleocr/tools/utils.py` | langgenius | take_target |
+> ⚠️ **系统问题**：以下 13 个文件中，11 个为 langgenius 插件。按仓库约定（非 cvte author 插件直接采用 upstream），这 11 个文件应由系统自动 `take_target`，无需人工介入。系统未能基于 `manifest.yaml` 中的 `author` 元数据自动决策，是 conflict_analysis 阶段的策略盲区。
+
+| 文件 | 判断依据 | 决定 | 是否应人工 |
+|------|----------|------|------------|
+| `models/azure_openai/provider/azure_openai.yaml` | cvte 插件，upstream 新增 Entra ID auth 有价值 | take_target | ✅ 应人工 |
+| `models/tongyi/manifest.yaml` | cvte 插件，upstream 要改 author 回 langgenius | take_current（保留 cvte） | ✅ 应人工 |
+| `agent-strategies/cot_agent/strategies/ReAct.py` | langgenius 插件 | take_target | ❌ 应自动 |
+| `agent-strategies/cot_agent/strategies/function_calling.py` | langgenius 插件 | take_target | ❌ 应自动 |
+| `models/bedrock/manifest.yaml` | langgenius，版本升级 0.0.54→0.0.58 | take_target | ❌ 应自动 |
+| `models/bedrock/utils/inference_profile.py` | langgenius | take_target | ❌ 应自动 |
+| `models/ollama/manifest.yaml` | langgenius | take_target | ❌ 应自动 |
+| `tools/jira/provider/jira.yaml` | langgenius | take_target | ❌ 应自动 |
+| `tools/paddleocr/manifest.yaml` | langgenius，版本升级 0.1.3→0.1.4 | take_target | ❌ 应自动 |
+| `tools/paddleocr/tools/document_parsing.py` | langgenius | take_target | ❌ 应自动 |
+| `tools/paddleocr/tools/document_parsing_vl.py` | langgenius | take_target | ❌ 应自动 |
+| `tools/paddleocr/tools/text_recognition.py` | langgenius | take_target | ❌ 应自动 |
+| `tools/paddleocr/tools/utils.py` | langgenius | take_target | ❌ 应自动 |
 
 **断言**:
 - [x] conflict_analysis 正确识别需要语义合并的文件
-- [x] cvte 插件与 langgenius 插件的决策路径被正确区分
+- [FAIL] cvte 插件与 langgenius 插件的决策路径被正确区分（系统未读取 manifest.yaml author 字段，11 个 langgenius 插件被错误升级为人工，应自动 take_target）
 - [x] `--decisions` 文件格式（decisions: list）被正确解析
 - [x] 13 个文件决策全部被系统加载（"Loaded 13 decisions"）
 
@@ -165,7 +167,8 @@ veto_triggered: false
 
 **人工裁定接受决策**（用户身份）:
 - 决定: **ACCEPT** judge_verdict
-- 原因: 已知局限，不影响流程验证；D-missing 问题属系统设计边界，escalate_human 文件需人工手动合并
+- 原因: D-missing 问题（44 issues）属系统设计边界，escalate_human 文件（8 issues）需人工手动合并，均为已知局限
+- ⚠️ **遗漏**：5 个 B-class 非 cvte 文件（`tools/email/`、`tools/aihubmix_image/`）与 upstream 不一致，属可修复问题，未处理即接受 FAIL 是流程疏漏；系统应在 FAIL 接受前区分"系统局限"与"可修复问题"并强制确认
 
 **断言**:
 - [x] Judge 成功运行 LLM 逐文件审查（71 files × ~8-15s/file）
@@ -214,10 +217,10 @@ veto_triggered: false
 
 ### P1（影响自动化率）
 
-3. **超大文件（>30K chars）无法 LLM 处理**  
-   `azure_openai/models/constants.py`（139K chars）、`llm.py`（69K chars）超出 LLM 修复上限（30K），被反复 escalate。建议：
-   - 为超大 cvte 文件生成结构化 diff patch，分段提交
-   - 或在初始化时将 `>30K` 文件自动分类为 `human_required`，避免无效的 LLM 尝试
+3. **超大文件（>30K chars）无法整体 LLM 处理**  
+   `azure_openai/models/constants.py`（139K chars）、`llm.py`（69K chars）超出单次 LLM 上下文，被反复 escalate。建议：
+   - 按语义边界（函数/类/import block）将文件分块，每块独立调用 LLM 合并，结果拼接后做语法完整性校验
+   - `human_required` 仅作分块合并失败的兜底，不应作为大文件的主要处理路径
 
 4. **Judge repair 超时严重（~9 min/大文件）**  
    182s 请求超时 × 3次重试 = 每个大文件耗时 9 分钟。建议降低 `request_timeout_seconds` 到 60s，减少单次等待时间。或在 `executor.repair()` 中预先检查文件大小，跳过无法处理的大文件。
@@ -233,11 +236,126 @@ veto_triggered: false
 7. **resume 不支持从 `judge_reviewing` 直接注入 `judge_resolution`**  
    目前 resume.py 仅在 `state.status == AWAITING_HUMAN` 时处理 `judge_resolution`。应扩展以支持从 `judge_reviewing` 状态注入，避免需要手动修改 checkpoint。
 
-8. **B-class 文件判断过于严格**  
-   `tools/email/` 文件被判定为 "B-class differs from upstream" 但实际上是有意的 CVTE 定制。Judge 的 B-class 检测应参考 `manifest.yaml` 中的 `author` 字段，对 `author: cvte` 的插件给予豁免。
+8. **Judge B-class 检查未区分文件性质**  
+   `tools/email/` 的 author 为 langgenius（非 cvte），Judge 将其标记为"B-class differs from upstream"是正确判断，不应被视为误报。  
+   真正的问题在于 `author: cvte` 的插件：这类文件与 upstream 不一致是预期的（存在二次开发定制），但 Judge 目前对所有文件统一使用"与 upstream 一致"作为检查标准，会将合法定制误判为问题。  
+   建议：Judge 对 `author: cvte` 文件切换检查标准为"定制逻辑是否被保留"（即合并后 cvte 新增的业务逻辑、接口扩展等不得丢失），而非要求与 upstream 完全一致。
 
 9. **YAML 决策文件中含冒号的注释字段报错**  
    `reviewer_notes: Non-cvte plugin (author: langgenius)` 中的冒号导致 YAML 解析失败。建议 collect_decisions_file 使用更宽松的解析，或在文档中提示注释字段需加引号。
+
+---
+
+---
+
+## 系统改进方案
+
+> 以下改进均面向通用场景设计，不针对 dify-official-plugins 仓库写死任何规则。系统通过可配置机制理解仓库约定，由用户在 `config.yaml` 中声明，agent 读取后通用执行。
+
+---
+
+### 改进 A：项目约定上下文注入（解决 11 个 langgenius 文件被错误升级问题）
+
+**根因**：`conflict_analysis` 阶段将无法自动合并的文件一律升级为人工，Planner 和 ConflictAnalystAgent 对目标仓库的合并约定一无所知，无法自主决策。并非所有项目都有统一的元数据文件（如 `manifest.yaml`），约定更多存在于仓库的 `CLAUDE.md`、`README.md` 或用户的自然语言描述中。
+
+**方案**：系统在初始化阶段自动读取目标仓库的上下文文档，将其作为"项目约定"注入所有决策 agent 的 prompt。用户也可在 `.merge/config.yaml` 中通过 `project_context` 字段补充或覆盖。Agent 通过 LLM 理解这些自然语言约定并在决策时应用，无需学习 DSL。
+
+**上下文来源（按优先级合并）**：
+1. `.merge/config.yaml` 中的 `project_context` 字段（用户显式声明，优先级最高）
+2. 目标仓库根目录的 `CLAUDE.md`（若存在）
+3. 目标仓库根目录的 `README.md`（若存在，截取前 N 行）
+
+**当以上来源均为空时**：系统在 `ANALYSIS` 阶段末尾检测到 `resolved_project_context` 为空，自动提示用户运行 `merge init`（或 `merge <branch> --init-context`）；该命令分析目标仓库的目录结构、代表性文件（`manifest.yaml`、`pyproject.toml`、`package.json` 等）和 git log，调用 LLM 生成初始 `CLAUDE.md` 草稿并写入目标仓库根目录，供用户审阅后复用。
+
+**配置示例**（`.merge/config.yaml`）：
+```yaml
+project_context: |
+  本仓库为 Dify 插件集合。判断合并策略的关键依据是插件目录下
+  manifest.yaml 中的 author 字段：
+  - author 为第三方（如 langgenius）的插件：无二次开发，直接采用 upstream 版本
+  - author 为 cvte 的插件：存在定制化开发，需语义合并并保留 cvte 新增的业务逻辑
+  - models/dify-api 目录下的插件存在模型托管定制，合并时需格外注意接口兼容性
+```
+
+**涉及改动**：
+| 文件 | 改动 |
+|------|------|
+| `src/models/config.py` | `MergeConfig` 增加 `project_context: str = ""` 字段 |
+| `src/core/runner.py`（或初始化入口） | 启动时读取目标仓库 `CLAUDE.md` / `README.md`，与 `project_context` 合并为 `resolved_project_context` 存入 `MergeState`；若三者均为空，在 `ANALYSIS` 结束后提示用户运行 `merge init` |
+| `src/cli/init_context.py`（新增） | `merge init` 子命令实现：扫描目标仓库结构与代表性文件，调用 LLM 生成 `CLAUDE.md` 草稿并写入目标仓库根目录 |
+| `src/agents/planner_agent.py` | prompt 中注入 `resolved_project_context`，要求 Planner 在制定计划时参考项目约定决定文件策略 |
+| `src/agents/conflict_analyst_agent.py` | prompt 中注入 `resolved_project_context`，在判断是否升级人工前先依据约定推断策略 |
+
+---
+
+### 改进 B：Judge issue 分级与 FAIL 接受门控（解决可修复问题被静默接受问题）
+
+**根因**：`JudgeIssue` 没有区分"系统局限（无法自动修复）"与"可修复问题"，FAIL 接受时系统不强制确认，导致用户误接受了本可修复的 B-class issue。
+
+**方案**：为 `JudgeIssue` 增加 `resolvability` 字段；Judge prompt 要求对每个 issue 分类；`judge_review` phase 在 FAIL 时，若存在 `fixable` issues，进入 `AWAITING_HUMAN` 并展示清单，而非静默接受。
+
+**`resolvability` 枚举值**：
+- `fixable`：文件与 upstream 不一致且可通过 take_target / 重新合并修复
+- `system_limitation`：D-missing、策略不支持等已知系统边界
+- `human_required`：escalate_human 文件，需人工手动处理
+
+**涉及改动**：
+| 文件 | 改动 |
+|------|------|
+| `src/models/judge.py` | `JudgeIssue` 增加 `resolvability: Literal["fixable", "system_limitation", "human_required"]` 字段 |
+| `src/agents/judge_agent.py` | 更新 Judge prompt，要求对每个 issue 填写 `resolvability`，并给出分类依据 |
+| `src/core/phases/judge_review.py` | FAIL 时检查是否存在 `fixable` issues；若有，状态机转 `AWAITING_HUMAN` 并附 fixable 清单，强制用户确认或处理后再接受 |
+
+---
+
+### 改进 C：大文件语义分块处理（解决 >30K 文件无法 LLM 合并问题）
+
+**根因**：Executor 对大文件直接传整体内容给 LLM，超出上下文限制后只能 escalate_human，无法利用 LLM 辅助。
+
+**方案**：新增 `ChunkMergeExecutor`，将大文件按语义边界拆分为若干块（每块 ≤ 配置的 `chunk_size_chars`），对每块独立调用 LLM 合并，拼接结果后做语法完整性校验；校验失败时才降级为 `human_required`。
+
+**语义分块策略**（按优先级选择）：
+1. Python/Go/JS：按顶层函数/类边界切分（使用 AST 或正则识别 `def`/`class`/`func` 等）
+2. YAML/JSON：按顶层 key 切分
+3. 其他：按固定行数切分，在空行处对齐
+
+**涉及改动**：
+| 文件 | 改动 |
+|------|------|
+| `src/tools/chunk_processor.py` | 新增文件，实现 `split_by_semantic_boundary(content, file_ext, chunk_size)` 和 `merge_chunks(chunks)` |
+| `src/agents/executor_agent.py` | 检测文件大小；超过 `chunk_size_chars` 阈值时路由到 `ChunkMergeExecutor`；分块合并结果需通过语法校验 |
+| `src/models/config.py` | `MergeConfig` 增加 `chunk_size_chars: int = 20000` 配置项 |
+
+---
+
+### 改进 D：Judge 文件检查策略可配置化（解决 cvte 定制文件被误判问题）
+
+**根因**：Judge 对所有文件统一使用"合并结果应与 upstream 一致"的检查标准，无法识别"定制文件与 upstream 不同是预期行为"的场景，导致合法定制被误报为 critical issue。
+
+**方案**：`FileMergeDecision` 增加 `judge_check_strategy` 字段，Planner 基于 `metadata_rules` 为文件分配检查策略，Judge agent 根据策略使用不同的 prompt 评估标准：
+
+| `judge_check_strategy` | 检查目标 |
+|------------------------|----------|
+| `upstream_match`（默认）| 合并结果与 upstream 相比无遗漏、无引入错误 |
+| `customization_preserved` | 定制新增的业务逻辑、接口扩展、配置字段在合并后完整保留；upstream 新增内容被正确集成 |
+
+**涉及改动**：
+| 文件 | 改动 |
+|------|------|
+| `src/models/plan.py` | `FileMergeDecision` 增加 `judge_check_strategy: Literal["upstream_match", "customization_preserved"] = "upstream_match"` |
+| `src/agents/planner_agent.py` | 在生成 plan 时，命中 `metadata_rules` 且策略为 `semantic_merge` 的文件自动设置 `judge_check_strategy = "customization_preserved"` |
+| `src/agents/judge_agent.py` | Judge prompt 根据 `judge_check_strategy` 切换评估标准；`customization_preserved` 策略下不将"与 upstream 不一致"本身视为 issue |
+
+---
+
+### 改进优先级
+
+| 优先级 | 改进 | 影响 |
+|--------|------|------|
+| P0 | **改进 A**（元数据规则） | 消除大量不必要的人工干预，直接提升自动化率 |
+| P0 | **改进 B**（issue 分级） | 防止可修复问题被静默接受，保证合并质量 |
+| P1 | **改进 C**（分块处理） | 解锁大文件 LLM 合并能力，减少 human_required |
+| P1 | **改进 D**（check strategy） | 消除定制文件误报，提升 Judge 结果可信度 |
 
 ---
 

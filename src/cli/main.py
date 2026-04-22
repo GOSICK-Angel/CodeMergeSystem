@@ -115,6 +115,20 @@ def resume_command(
     resume_command_impl(run_id, checkpoint, decisions)
 
 
+@cli.command("init")
+@click.option(
+    "--repo-path",
+    default=".",
+    show_default=True,
+    help="Path to the target repository",
+)
+def init_command(repo_path: str) -> None:
+    """Generate a CLAUDE.md for the target repository to guide merge decisions."""
+    from src.cli.commands.init_context import init_command_impl
+
+    init_command_impl(repo_path)
+
+
 @cli.command("validate")
 @click.option("--config", "-c", required=True, type=click.Path(exists=True))
 def validate_command(config: str) -> None:

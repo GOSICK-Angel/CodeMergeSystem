@@ -12,7 +12,9 @@ from src.core.phases._gate_helpers import (
 from src.core.read_only_state_view import ReadOnlyStateView
 from src.models.judge import (
     IssueSeverity,
+    IssueResolvability,
     JudgeIssue,
+    JudgeVerdict,
     VerdictType,
 )
 from src.models.plan import MergePhase
@@ -216,6 +218,8 @@ class JudgeReviewPhase(Phase):
 
         # No consensus after all dispute rounds → consult Coordinator
         rounds_done = state.judge_repair_rounds + 1
+        self._warn_fixable_issues(state)
+
         if ctx.coordinator is not None:
             decision = ctx.coordinator.route_judge_stall(state)
             if decision.action == "meta_review":
@@ -231,7 +235,10 @@ class JudgeReviewPhase(Phase):
                     memory_phase="judge_review",
                 )
 
-        reason = f"judge verdict: no consensus after {rounds_done} dispute rounds"
+        fixable_count = self._count_fixable_issues(state.judge_verdict)
+        reason = f"judge verdict: FAIL after {rounds_done} dispute rounds" + (
+            f" ({fixable_count} fixable issues)" if fixable_count else ""
+        )
         ctx.state_machine.transition(state, SystemStatus.AWAITING_HUMAN, reason)
         return PhaseOutcome(
             target_status=SystemStatus.AWAITING_HUMAN,
@@ -340,3 +347,46 @@ class JudgeReviewPhase(Phase):
                     ),
                 }
             )
+
+    @staticmethod
+    def _count_fixable_issues(verdict: JudgeVerdict | None) -> int:
+        if verdict is None:
+            return 0
+        return sum(
+            1 for i in verdict.issues if i.resolvability == IssueResolvability.FIXABLE
+        )
+
+    def _warn_fixable_issues(self, state: MergeState) -> None:
+        fixable = [
+            i
+            for i in (state.judge_verdict.issues if state.judge_verdict else [])
+            if i.resolvability == IssueResolvability.FIXABLE
+        ]
+        if not fixable:
+            return
+        lines = [
+            f"  [{i.issue_level.value.upper()}] {i.file_path}: {i.description}"
+            for i in fixable[:10]
+        ]
+        if len(fixable) > 10:
+            lines.append(f"  ... and {len(fixable) - 10} more")
+        logger.warning(
+            "%d fixable issue(s) detected — resolve before accepting FAIL verdict:\n%s",
+            len(fixable),
+            "\n".join(lines),
+        )
+        state.messages.append(
+            {
+                "type": "fixable_issues_warning",
+                "count": len(fixable),
+                "issues": [
+                    {
+                        "file_path": i.file_path,
+                        "issue_level": i.issue_level.value,
+                        "description": i.description,
+                        "suggested_fix": i.suggested_fix,
+                    }
+                    for i in fixable
+                ],
+            }
+        )

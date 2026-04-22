@@ -72,7 +72,7 @@ class ExecutorAgent(BaseAgent):
                 continue
 
             for file_path in batch.file_paths:
-                fd = file_diffs_map.get(file_path)  # type: ignore[assignment]
+                fd = file_diffs_map.get(file_path)
                 category = batch.change_category or (fd.change_category if fd else None)
                 strategy = self._select_strategy_by_category(category, batch.risk_level)
 
@@ -305,6 +305,21 @@ class ExecutorAgent(BaseAgent):
                 "Could not fetch file contents for semantic merge",
             )
 
+        chunk_size = state.config.chunk_size_chars
+        if max(len(current_content), len(target_content)) > chunk_size:
+            logger.info(
+                "Large file (%d chars): routing %s to chunked semantic merge",
+                max(len(current_content), len(target_content)),
+                file_diff.file_path,
+            )
+            return await self._execute_chunked_semantic_merge(
+                file_diff,
+                conflict_analysis,
+                current_content,
+                target_content,
+                state,
+            )
+
         enriched_context = state.config.project_context
         builder = None
         if self._memory_store:
@@ -371,6 +386,87 @@ class ExecutorAgent(BaseAgent):
             agent="executor",
             decision=MergeDecision.SEMANTIC_MERGE,
             rationale=conflict_analysis.rationale,
+            confidence=conflict_analysis.confidence,
+        )
+
+    async def _execute_chunked_semantic_merge(
+        self,
+        file_diff: FileDiff,
+        conflict_analysis: ConflictAnalysis,
+        current_content: str,
+        target_content: str,
+        state: MergeState,
+    ) -> FileDecisionRecord:
+        from src.tools.chunk_processor import (
+            align_chunks,
+            merge_chunks,
+            split_by_semantic_boundary,
+        )
+
+        file_path = file_diff.file_path
+        chunk_size = state.config.chunk_size_chars
+
+        current_chunks = split_by_semantic_boundary(
+            current_content, file_path, chunk_size
+        )
+        target_chunks = split_by_semantic_boundary(
+            target_content, file_path, chunk_size
+        )
+        pairs = align_chunks(current_chunks, target_chunks)
+
+        logger.info(
+            "Chunked merge %s: %d current chunks, %d target chunks → %d pairs",
+            file_path,
+            len(current_chunks),
+            len(target_chunks),
+            len(pairs),
+        )
+
+        merged_chunks: list[str] = []
+        for idx, (curr_chunk, tgt_chunk) in enumerate(pairs):
+            prompt = _build_chunk_merge_prompt(
+                file_path,
+                curr_chunk,
+                tgt_chunk,
+                idx + 1,
+                len(pairs),
+                state.config.project_context,
+                conflict_analysis.rationale,
+            )
+            try:
+                raw = await self._call_llm_with_retry(
+                    [{"role": "user", "content": prompt}],
+                    system=EXECUTOR_SYSTEM,
+                )
+                merged_chunks.append(parse_merge_result(str(raw)))
+            except Exception as e:
+                logger.warning(
+                    "Chunk %d/%d merge failed for %s: %s — escalating",
+                    idx + 1,
+                    len(pairs),
+                    file_path,
+                    e,
+                )
+                return create_escalate_record(
+                    file_path,
+                    f"CHUNKED_MERGE_FAILED (chunk {idx + 1}/{len(pairs)}): {e}",
+                )
+
+        merged_content = merge_chunks(merged_chunks)
+        current_phase_str = (
+            state.current_phase.value
+            if hasattr(state.current_phase, "value")
+            else str(state.current_phase)
+        )
+        return await apply_with_snapshot(
+            file_path,
+            merged_content,
+            self.git_tool,  # type: ignore[arg-type]  # checked by caller
+            state,
+            phase=current_phase_str,
+            agent="executor",
+            decision=MergeDecision.SEMANTIC_MERGE,
+            rationale=f"chunked_merge ({len(pairs)} chunks): {conflict_analysis.rationale}",
             confidence=conflict_analysis.confidence,
         )
 
@@ -702,6 +798,30 @@ def _extract_diff_ranges(file_diff: FileDiff) -> list[tuple[int, int]]:
     elif file_diff.lines_added > 0 or file_diff.lines_deleted > 0:
         ranges.append((1, file_diff.lines_added + file_diff.lines_deleted + 100))
     return ranges
+
+
+def _build_chunk_merge_prompt(
+    file_path: str,
+    current_chunk: str,
+    target_chunk: str,
+    chunk_num: int,
+    total_chunks: int,
+    project_context: str,
+    rationale: str,
+) -> str:
+    fence = "```"
+    lang = file_path.rsplit(".", 1)[-1] if "." in file_path else ""
+    return (
+        f"Merge chunk {chunk_num}/{total_chunks} of file `{file_path}`.\n\n"
+        f"# Project Context\n{project_context or 'No project context provided.'}\n\n"
+        f"# Merge Rationale\n{rationale}\n\n"
+        f"# Current (Fork) — chunk {chunk_num}/{total_chunks}\n"
+        f"{fence}{lang}\n{current_chunk}\n{fence}\n\n"
+        f"# Target (Upstream) — chunk {chunk_num}/{total_chunks}\n"
+        f"{fence}{lang}\n{target_chunk}\n{fence}\n\n"
+        "Merge these two sections: preserve fork customisations, incorporate upstream "
+        "changes. Return ONLY the merged content, no explanations, no code fences."
+    )
 
 
 from src.agents.registry import AgentRegistry  # noqa: E402

@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 from pydantic import BaseModel, BeforeValidator, Field
 
@@ -41,6 +41,17 @@ class IssueSeverity(str, Enum):
 IssueLevel = IssueSeverity
 
 
+class IssueResolvability(str, Enum):
+    FIXABLE = "fixable"
+    SYSTEM_LIMITATION = "system_limitation"
+    HUMAN_REQUIRED = "human_required"
+
+
+class JudgeCheckStrategy(str, Enum):
+    UPSTREAM_MATCH = "upstream_match"
+    CUSTOMIZATION_PRESERVED = "customization_preserved"
+
+
 class JudgeIssue(BaseModel):
     issue_id: str = Field(default_factory=lambda: str(uuid4()))
     file_path: str
@@ -51,6 +62,7 @@ class JudgeIssue(BaseModel):
     suggested_fix: str | None = None
     must_fix_before_merge: bool = False
     veto_condition: str | None = None
+    resolvability: IssueResolvability = IssueResolvability.FIXABLE
 
 
 class RepairInstruction(BaseModel):

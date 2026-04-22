@@ -54,6 +54,7 @@ class InitializePhase(Phase):
         )
 
     def _run_sync(self, state: MergeState, ctx: PhaseContext) -> None:
+        self._resolve_project_context(state, ctx)
         ctx.notify("orchestrator", "Computing merge base")
         git_merge_base = ctx.git_tool.get_merge_base(
             state.config.upstream_ref, state.config.fork_ref
@@ -218,6 +219,46 @@ class InitializePhase(Phase):
 
         if state.config.reverse_impact.enabled:
             self._run_reverse_impact(state, ctx, merge_base)
+
+    def _resolve_project_context(self, state: MergeState, ctx: PhaseContext) -> None:
+        repo_root = Path(state.config.repo_path).resolve()
+        parts: list[str] = []
+
+        claude_md = repo_root / "CLAUDE.md"
+        if claude_md.exists():
+            content = claude_md.read_text(encoding="utf-8").strip()
+            if content:
+                parts.append(content)
+                logger.info(
+                    "Loaded project context from CLAUDE.md (%d chars)", len(content)
+                )
+
+        readme = repo_root / "README.md"
+        if readme.exists():
+            lines = readme.read_text(encoding="utf-8").splitlines()[:200]
+            content = "\n".join(lines).strip()
+            if content:
+                parts.append(content)
+                logger.info("Loaded README.md excerpt (%d lines)", min(200, len(lines)))
+
+        if state.config.project_context:
+            parts.insert(0, state.config.project_context.strip())
+
+        merged = "\n\n---\n\n".join(filter(None, parts))
+
+        if not merged:
+            logger.warning(
+                "No project context found (CLAUDE.md, README.md, or config "
+                "project_context). Run `merge init` to generate a CLAUDE.md "
+                "for better merge decisions."
+            )
+            ctx.notify(
+                "orchestrator",
+                "⚠ No project context found — run `merge init` for better decisions",
+            )
+        else:
+            state.config = state.config.model_copy(update={"project_context": merged})
+            logger.info("Resolved project context: %d chars total", len(merged))
 
     def _run_reverse_impact(
         self, state: MergeState, ctx: PhaseContext, merge_base: str
