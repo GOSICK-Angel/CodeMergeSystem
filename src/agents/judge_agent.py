@@ -10,7 +10,6 @@ from src.models.diff import FileDiff, RiskLevel
 from src.models.decision import FileDecisionRecord, MergeDecision
 from src.models.judge import (
     BatchVerdict,
-    DisputePoint,
     ExecutorRebuttal,
     JudgeCheckStrategy,
     JudgeVerdict,

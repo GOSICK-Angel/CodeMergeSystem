@@ -8,7 +8,6 @@ from src.agents.registry import AgentRegistry
 from src.llm.client import ModelOutputError
 from src.llm.prompts.gate_registry import get_gate
 from src.memory.models import ConfidenceLevel, MemoryEntry, MemoryEntryType
-from src.models.config import AgentLLMConfig
 from src.models.message import AgentMessage, AgentType, MessageType
 from src.models.plan import MergePhase
 from src.models.state import MergeState

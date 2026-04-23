@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
