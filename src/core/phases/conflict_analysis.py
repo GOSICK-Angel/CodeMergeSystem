@@ -15,6 +15,7 @@ from src.models.plan import MergePhase
 from src.models.state import MergeState, PhaseResult, SystemStatus
 from src.tools.commit_replayer import CommitReplayer
 from src.tools.git_committer import GitCommitter
+from src.tools.git_tool import GitTool
 from src.tools.rule_resolver import RuleBasedResolver
 
 logger = logging.getLogger(__name__)
@@ -101,21 +102,93 @@ def _select_merge_strategy(
     return MergeDecision.ESCALATE_HUMAN
 
 
+def _build_diff_preview(
+    file_path: str,
+    upstream_ref: str,
+    fork_ref: str,
+    git_tool: "GitTool | None",
+    max_lines: int = 120,
+) -> tuple[str, str]:
+    """O-G1: produce a unified diff preview of upstream vs fork content.
+
+    Returns ``(take_target_preview, take_current_preview)`` — short bodies
+    suitable for ``DecisionOption.preview_content``. Empty strings are
+    returned when the git tool is unavailable or both refs miss the file.
+    """
+    if git_tool is None:
+        return "", ""
+    try:
+        upstream_raw = git_tool.get_file_content(upstream_ref, file_path)
+        current_raw = git_tool.get_file_content(fork_ref, file_path)
+    except Exception:
+        return "", ""
+    upstream = upstream_raw if isinstance(upstream_raw, str) else ""
+    current = current_raw if isinstance(current_raw, str) else ""
+    if not upstream and not current:
+        return "", ""
+
+    import difflib
+
+    upstream_lines = upstream.splitlines(keepends=True)
+    current_lines = current.splitlines(keepends=True)
+    diff = list(
+        difflib.unified_diff(
+            current_lines,
+            upstream_lines,
+            fromfile=f"fork:{file_path}",
+            tofile=f"upstream:{file_path}",
+            n=3,
+        )
+    )
+    if len(diff) > max_lines:
+        diff = diff[:max_lines] + [f"... (+{len(diff) - max_lines} more lines)\n"]
+    take_target = "".join(diff) or "(no textual diff)"
+
+    reverse = list(
+        difflib.unified_diff(
+            upstream_lines,
+            current_lines,
+            fromfile=f"upstream:{file_path}",
+            tofile=f"fork:{file_path}",
+            n=3,
+        )
+    )
+    if len(reverse) > max_lines:
+        reverse = reverse[:max_lines] + [
+            f"... (+{len(reverse) - max_lines} more lines)\n"
+        ]
+    take_current = "".join(reverse) or "(no textual diff)"
+    return take_target, take_current
+
+
 def _build_human_decision_request(
-    fd: FileDiff, analysis: ConflictAnalysis
+    fd: FileDiff,
+    analysis: ConflictAnalysis,
+    upstream_ref: str | None = None,
+    fork_ref: str | None = None,
+    git_tool: "GitTool | None" = None,
 ) -> HumanDecisionRequest:
     rec_val = analysis.recommended_strategy
+
+    take_target_preview = ""
+    take_current_preview = ""
+    if upstream_ref and fork_ref:
+        take_target_preview, take_current_preview = _build_diff_preview(
+            fd.file_path, upstream_ref, fork_ref, git_tool
+        )
 
     options = [
         DecisionOption(
             option_key="A",
             decision=MergeDecision.TAKE_CURRENT,
             description="Keep fork (current) version",
+            preview_content=take_current_preview or None,
         ),
         DecisionOption(
             option_key="B",
             decision=MergeDecision.TAKE_TARGET,
             description="Take upstream (target) version",
+            preview_content=take_target_preview or None,
         ),
         DecisionOption(
             option_key="C",
@@ -436,7 +509,13 @@ class ConflictAnalysisPhase(Phase):
 
             if strategy == MergeDecision.ESCALATE_HUMAN:
                 needs_human.append(file_path)
-                req = _build_human_decision_request(fd, analysis)
+                req = _build_human_decision_request(
+                    fd,
+                    analysis,
+                    upstream_ref=state.config.upstream_ref,
+                    fork_ref=state.config.fork_ref,
+                    git_tool=ctx.git_tool,
+                )
                 state.human_decision_requests[file_path] = req
             elif strategy == MergeDecision.SEMANTIC_MERGE:
                 record = await executor.execute_semantic_merge(fd, analysis, state)

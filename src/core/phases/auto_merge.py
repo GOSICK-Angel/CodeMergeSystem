@@ -113,18 +113,28 @@ class AutoMergePhase(Phase):
         replayed_set: set[str] = set()
         if ctx.config.history.enabled and ctx.config.history.cherry_pick_clean:
             replayable = state.replayable_commits
-            if replayable:
+            partial = state.partial_replayable_commits
+            if replayable or partial:
                 replayer = CommitReplayer()
                 ctx.notify(
-                    "executor", f"Cherry-picking {len(replayable)} clean commits"
+                    "executor",
+                    f"Cherry-picking {len(replayable)} clean + "
+                    f"{len(partial)} partial commits",
                 )
                 replay_result = await replayer.replay_clean_commits(
                     ctx.git_tool, replayable, state
                 )
+                # O-R1: fall back to per-file cherry-pick for mixed commits.
+                if partial:
+                    await replayer.replay_partial_commits(
+                        ctx.git_tool, partial, replay_result
+                    )
                 replayed_set = set(replay_result.replayed_files)
+                state.partial_replays = list(replay_result.partial_replays)
                 logger.info(
-                    "Replay: %d commits cherry-picked, %d failed",
+                    "Replay: %d commits cherry-picked (%d partial), %d failed",
                     len(replay_result.replayed_shas),
+                    len(replay_result.partial_replays),
                     len(replay_result.failed_shas),
                 )
                 # Record replayed files in file_decision_records so they appear

@@ -33,6 +33,7 @@ class TestErrorCategory:
             "context_overflow",
             "transport",
             "format",
+            "provider_empty",
             "unknown",
         }
         assert {c.value for c in ErrorCategory} == expected

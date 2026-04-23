@@ -188,17 +188,20 @@ class InitializePhase(Phase):
                 merge_base, state.config.upstream_ref
             )
             replayer = CommitReplayer()
-            replayable, non_replayable = replayer.classify_commits(
+            fully, partial, none = replayer.classify_commits_with_partial(
                 upstream_commits, file_categories
             )
             state.upstream_commits = upstream_commits
-            state.replayable_commits = replayable
-            state.non_replayable_commits = non_replayable
+            state.replayable_commits = fully
+            state.partial_replayable_commits = partial
+            state.non_replayable_commits = none
             logger.info(
-                "Commit replay classification: %d replayable, %d non-replayable "
-                "out of %d total upstream commits",
-                len(replayable),
-                len(non_replayable),
+                "Commit replay classification: %d fully-replayable, "
+                "%d partially-replayable, %d non-replayable "
+                "out of %d total upstream commits (O-R1)",
+                len(fully),
+                len(partial),
+                len(none),
                 len(upstream_commits),
             )
 

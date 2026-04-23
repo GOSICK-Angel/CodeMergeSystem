@@ -159,6 +159,8 @@ class MergeState(BaseModel):
     upstream_commits: list[dict[str, Any]] = Field(default_factory=list)
     replayable_commits: list[dict[str, Any]] = Field(default_factory=list)
     non_replayable_commits: list[dict[str, Any]] = Field(default_factory=list)
+    partial_replayable_commits: list[dict[str, Any]] = Field(default_factory=list)
+    partial_replays: list[dict[str, Any]] = Field(default_factory=list)
 
     replayed_commits: list[str] = Field(default_factory=list)
     replayed_files: list[str] = Field(default_factory=list)

@@ -1,6 +1,7 @@
 import logging
 import time
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 import asyncio
@@ -26,6 +27,23 @@ from src.core.hooks import HOOK_LLM_END, HOOK_LLM_START, HookManager
 from src.tools.trace_logger import TraceLogger
 
 CIRCUIT_BREAKER_THRESHOLD = 3
+
+# O-F1: sliding-window fallback trigger. Tracks the last N outcomes of
+# ``_call_llm_with_retry`` (True=success, False=failure); when the failure
+# rate crosses the threshold we flip to the fallback provider without
+# requiring *consecutive* failures.
+_SLIDING_WINDOW_SIZE = 20
+_SLIDING_WINDOW_FAILURE_RATIO = 0.6
+_SLIDING_WINDOW_MIN_SAMPLES = 10
+
+# O-F1: certain error categories are known to vanish after a provider swap
+# (e.g. Anthropic thinking-block parsing, OpenAI empty-content). Route them
+# straight to fallback instead of waiting for the consecutive threshold.
+_IMMEDIATE_FALLBACK_CATEGORIES: frozenset[ErrorCategory] = frozenset(
+    {
+        ErrorCategory.PROVIDER_EMPTY,
+    }
+)
 
 _CIRCUIT_BREAKER_CATEGORIES: frozenset[ErrorCategory] = frozenset(
     {
@@ -99,6 +117,7 @@ class BaseAgent(ABC):
         self._trace_logger: TraceLogger | None = None
         self._memory_store: MemoryStore | None = None
         self._consecutive_failures: int = 0
+        self._sliding_window: deque[bool] = deque(maxlen=_SLIDING_WINDOW_SIZE)
         self._credential_pool: CredentialPool | None = self._init_credential_pool()
         self._cost_tracker: CostTracker | None = None
         self._current_phase: str = ""
@@ -187,6 +206,25 @@ class BaseAgent(ABC):
 
     def reset_circuit_breaker(self) -> None:
         self._consecutive_failures = 0
+        self._sliding_window.clear()
+
+    def _sliding_window_failure_rate(self) -> tuple[int, float]:
+        """Return ``(sample_count, failure_ratio)`` of the current window."""
+        samples = len(self._sliding_window)
+        if samples == 0:
+            return 0, 0.0
+        failures = sum(1 for ok in self._sliding_window if not ok)
+        return samples, failures / samples
+
+    def _should_fallback_by_window(self) -> bool:
+        """O-F1: decide whether the sliding-window failure rate warrants a
+        switch to the fallback provider even before the consecutive-failure
+        circuit breaker trips."""
+        samples, ratio = self._sliding_window_failure_rate()
+        return (
+            samples >= _SLIDING_WINDOW_MIN_SAMPLES
+            and ratio >= _SLIDING_WINDOW_FAILURE_RATIO
+        )
 
     def get_memory_context(
         self,
@@ -432,6 +470,7 @@ class BaseAgent(ABC):
                     resp_len,
                 )
                 self._consecutive_failures = 0
+                self._sliding_window.append(True)
                 if self._trace_logger:
                     self._trace_logger.record(
                         agent=self.agent_type.value,
@@ -505,6 +544,39 @@ class BaseAgent(ABC):
                         budget_available=budget.available,
                         utilization=round(utilization, 4),
                     )
+
+                self._sliding_window.append(False)
+
+                # O-F1: certain error categories nearly always clear after a
+                # provider swap. Don't wait for the consecutive-failure or
+                # sliding-window thresholds — flip to fallback immediately.
+                if (
+                    classified.category in _IMMEDIATE_FALLBACK_CATEGORIES
+                    and self._fallback_llm is not None
+                    and not self._using_fallback
+                ):
+                    if self._on_fallback_needed(classified):
+                        retry_budget.consume_attempt()
+                        continue
+
+                # O-F1: sliding-window error-rate trigger. Even if the
+                # classified error is retryable, a sustained high error rate
+                # means the provider is unhealthy — route to fallback now.
+                if (
+                    self._should_fallback_by_window()
+                    and self._fallback_llm is not None
+                    and not self._using_fallback
+                ):
+                    samples, ratio = self._sliding_window_failure_rate()
+                    self.logger.warning(
+                        "Sliding-window failure rate %.2f over %d samples — "
+                        "switching to fallback provider",
+                        ratio,
+                        samples,
+                    )
+                    if self._on_fallback_needed(classified):
+                        retry_budget.consume_attempt()
+                        continue
 
                 if not classified.retryable:
                     if classified.should_fallback:

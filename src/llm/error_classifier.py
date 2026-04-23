@@ -21,6 +21,7 @@ class ErrorCategory(StrEnum):
     CONTEXT_OVERFLOW = "context_overflow"
     TRANSPORT = "transport"
     FORMAT = "format"
+    PROVIDER_EMPTY = "provider_empty"
     UNKNOWN = "unknown"
 
 
@@ -95,10 +96,32 @@ def _is_connection_error(error: Exception) -> bool:
     return isinstance(error, (ConnectionError, TimeoutError, OSError))
 
 
+_EMPTY_CONTENT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"returned empty content", re.IGNORECASE),
+    re.compile(r"no text blocks", re.IGNORECASE),
+)
+
+
 def classify_error(error: Exception, provider: str = "") -> ClassifiedError:
     """Classify an LLM API error into a semantic category with recovery hints."""
     status = _get_status_code(error)
     msg = _get_error_message(error)
+
+    # O-E1: provider returned a syntactically valid response whose content
+    # field is empty (OpenAI finish_reason=='stop' + null content, or
+    # Anthropic response with only thinking blocks). These usually recover
+    # if we switch providers — prefer fallback, and back off a bit longer
+    # than generic UNKNOWN so we avoid a retry storm.
+    if isinstance(error, RuntimeError) and _matches_any(msg, _EMPTY_CONTENT_PATTERNS):
+        return ClassifiedError(
+            category=ErrorCategory.PROVIDER_EMPTY,
+            retryable=True,
+            should_compress=False,
+            should_rotate=False,
+            should_fallback=True,
+            cooldown_seconds=5,
+            message=f"Provider empty response ({provider}): {msg}",
+        )
 
     if _is_connection_error(error):
         return ClassifiedError(

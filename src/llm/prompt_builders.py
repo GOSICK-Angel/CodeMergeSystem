@@ -16,8 +16,12 @@ from src.models.config import AgentLLMConfig
 
 logger = logging.getLogger(__name__)
 
-STAGED_THRESHOLD_LINES = 500
-STAGED_THRESHOLD_CHARS = 15_000
+# O-C2: lowered thresholds so staged processing covers more Judge / Analyst
+# calls. Previously only 2.6% of 990 calls entered the relevance-scoring path;
+# most payloads <15k chars stayed un-compressed even when the actual output
+# only needed 1–2k output tokens.
+STAGED_THRESHOLD_LINES = 200
+STAGED_THRESHOLD_CHARS = 8_000
 
 
 class AgentPromptBuilder:

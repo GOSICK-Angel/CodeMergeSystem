@@ -290,9 +290,30 @@ class OpenAIClient(LLMClient):
 
 
 class LLMClientFactory:
+    _WARNED_CACHE_OPENAI: bool = False
+
     @staticmethod
     def create(config: AgentLLMConfig) -> LLMClient:
         primary_env = config.api_key_env_list[0]
+        # O-C3: prompt caching is an Anthropic-only feature. If the user
+        # leaves ``cache_strategy`` at its default but routes to OpenAI they
+        # silently get zero cache hits — warn once per process so ops can
+        # either switch providers or migrate to a stable system-preamble
+        # pattern for OpenAI.
+        if (
+            config.provider == "openai"
+            and config.cache_strategy != "none"
+            and not LLMClientFactory._WARNED_CACHE_OPENAI
+        ):
+            import logging as _logging
+
+            _logging.getLogger("llm.factory").warning(
+                "cache_strategy=%r has no effect on OpenAI (%s); Anthropic-only. "
+                "Set cache_strategy='none' to silence this warning.",
+                config.cache_strategy,
+                config.model,
+            )
+            LLMClientFactory._WARNED_CACHE_OPENAI = True
         api_key = os.environ.get(primary_env)
         if not api_key:
             raise EnvironmentError(

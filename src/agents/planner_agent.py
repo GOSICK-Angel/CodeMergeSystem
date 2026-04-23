@@ -134,6 +134,29 @@ class PlannerAgent(BaseAgent):
 
         phases: list[PhaseFileBatch] = []
 
+        # O-D1: D-missing fast-track — pure new files (no shadow conflict)
+        # carry no dependency and can land unconditionally at layer_id=None,
+        # so they never get dropped when a downstream layer's dependencies
+        # fail to complete. Files that overlap a shadow conflict still
+        # follow the per-layer HUMAN_REVIEW path below.
+        d_missing_fast_track = [
+            fp
+            for fp, cat in actionable_files.items()
+            if cat == FileChangeCategory.D_MISSING and fp not in shadow_paths
+        ]
+        if d_missing_fast_track:
+            phases.append(
+                PhaseFileBatch(
+                    batch_id=str(uuid4()),
+                    phase=MergePhase.AUTO_MERGE,
+                    file_paths=sorted(d_missing_fast_track),
+                    risk_level=RiskLevel.AUTO_SAFE,
+                    layer_id=None,
+                    change_category=FileChangeCategory.D_MISSING,
+                    can_parallelize=True,
+                )
+            )
+
         for layer in layers:
             layer_files = file_layer_map.get(layer.layer_id, [])
             if not layer_files:
@@ -173,20 +196,10 @@ class PlannerAgent(BaseAgent):
                 )
 
             d_files_all = by_category.get(FileChangeCategory.D_MISSING, [])
-            d_files = [fp for fp in d_files_all if fp not in shadow_paths]
+            # O-D1: non-shadow D-missing files were already emitted into the
+            # fast-track batch above; only shadow-conflict ones need per-layer
+            # human review here.
             d_shadow_files = [fp for fp in d_files_all if fp in shadow_paths]
-            if d_files:
-                phases.append(
-                    PhaseFileBatch(
-                        batch_id=str(uuid4()),
-                        phase=MergePhase.AUTO_MERGE,
-                        file_paths=sorted(d_files),
-                        risk_level=RiskLevel.AUTO_SAFE,
-                        layer_id=layer.layer_id,
-                        change_category=FileChangeCategory.D_MISSING,
-                        can_parallelize=True,
-                    )
-                )
             if d_shadow_files:
                 phases.append(
                     PhaseFileBatch(

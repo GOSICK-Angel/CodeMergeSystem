@@ -190,6 +190,88 @@ class GitTool:
         except git.GitCommandError:
             return False
 
+    def cherry_pick_strategy_ladder(
+        self, sha: str, strategies: list[tuple[str, ...]] | None = None
+    ) -> tuple[bool, str]:
+        """O-R3: try a sequence of cherry-pick strategies, aborting failures.
+
+        Each strategy is a tuple of extra CLI args passed to ``git cherry-pick``.
+        Returns ``(success, strategy_label)`` where ``strategy_label`` is a
+        human-readable description of the strategy that succeeded, or the
+        last-attempted one on failure.
+        """
+        ladder = strategies or [
+            (),
+            ("-X", "theirs"),
+            ("--strategy=recursive", "-X", "patience"),
+        ]
+        last_label = "default"
+        for args in ladder:
+            label = " ".join(args) if args else "default"
+            last_label = label
+            try:
+                if args:
+                    self.repo.git.cherry_pick(*args, sha)
+                else:
+                    self.repo.git.cherry_pick(sha)
+                return True, label
+            except git.GitCommandError:
+                self.cherry_pick_abort()
+                continue
+        return False, last_label
+
+    def cherry_pick_per_file(
+        self, sha: str, keep_files: list[str]
+    ) -> tuple[bool, list[str]]:
+        """O-R1: apply a subset of files from ``sha`` using ``-n`` (no-commit).
+
+        ``keep_files`` are staged; all other modified files from the commit
+        are unstaged and restored to HEAD. Caller is responsible for running
+        ``commit_staged`` with a faithful author/message. Returns
+        ``(success, applied_files)``.
+        """
+        if not keep_files:
+            return False, []
+        keep_set = {f.strip() for f in keep_files if f.strip()}
+        try:
+            self.repo.git.cherry_pick("-n", sha)
+        except git.GitCommandError:
+            self.cherry_pick_abort()
+            return False, []
+        try:
+            diff_output = self.repo.git.diff("--cached", "--name-only")
+            staged = [line.strip() for line in diff_output.splitlines() if line.strip()]
+            drop = [f for f in staged if f not in keep_set]
+            applied = [f for f in staged if f in keep_set]
+            if drop:
+                self.repo.git.reset("HEAD", "--", *drop)
+                self.repo.git.checkout("--", *drop)
+            return bool(applied), applied
+        except git.GitCommandError:
+            self.cherry_pick_abort()
+            return False, []
+
+    def get_commit_author_and_message(self, sha: str) -> tuple[str, str, str]:
+        """Return ``(author_name, author_email, message)`` for ``sha``."""
+        try:
+            name = str(self.repo.git.show("-s", "--format=%an", sha)).strip()
+            email = str(self.repo.git.show("-s", "--format=%ae", sha)).strip()
+            message = str(self.repo.git.show("-s", "--format=%B", sha)).strip()
+            return name, email, message
+        except git.GitCommandError:
+            return "", "", ""
+
+    def commit_with_author(
+        self, message: str, author_name: str, author_email: str
+    ) -> str:
+        """Commit currently staged changes with a specific author identity."""
+        author_spec = f"{author_name} <{author_email}>"
+        try:
+            self.repo.git.commit("-m", message, "--author", author_spec)
+            return str(self.repo.head.commit.hexsha)
+        except git.GitCommandError:
+            return ""
+
     def cherry_pick_abort(self) -> None:
         try:
             self.repo.git.cherry_pick("--abort")
