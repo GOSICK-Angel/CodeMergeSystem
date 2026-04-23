@@ -29,6 +29,7 @@ from src.models.judge import BatchVerdict
 from src.models.plan import MergePhase, PhaseFileBatch
 from src.models.plan_review import DecisionOption, UserDecisionItem
 from src.models.state import MergeState, PhaseResult, SystemStatus
+from src.tools.binary_assets import is_binary_asset
 from src.tools.commit_replayer import CommitReplayer
 from src.tools.conflict_markers import file_has_conflict_markers
 from src.tools.git_committer import GitCommitter
@@ -259,6 +260,137 @@ class AutoMergePhase(Phase):
                         ],
                     )
                 )
+
+        # --- O-B3: route binary asset files (png/jpg/woff/mp3/zip/...) away
+        # from the LLM batch pipeline, which cannot handle them without
+        # UTF-8 decode errors. Category-aware routing:
+        #   * C (both sides modified)  -> escalate to human decision
+        #   * anything else (B/D_*/A)  -> TAKE_TARGET via copy_from_upstream
+        binary_take_target: list[str] = []
+        binary_escalate: list[str] = []
+        for batch in state.merge_plan.phases:
+            if batch.risk_level not in (RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY):
+                continue
+            for file_path in batch.file_paths:
+                if file_path in replayed_set:
+                    continue
+                if file_path in state.file_decision_records:
+                    continue
+                if not is_binary_asset(file_path):
+                    continue
+                fd_item = file_diffs_map.get(file_path)
+                category = fd_item.change_category if fd_item else None
+                if category == FileChangeCategory.C:
+                    binary_escalate.append(file_path)
+                else:
+                    binary_take_target.append(file_path)
+
+        if binary_take_target or binary_escalate:
+            logger.info(
+                "O-B3: routing %d binary asset(s) to TAKE_TARGET and %d to "
+                "human escalation (bypassing LLM batch review)",
+                len(binary_take_target),
+                len(binary_escalate),
+            )
+
+        for fp in binary_take_target:
+            try:
+                record = await executor._copy_from_upstream(fp, state)
+            except Exception as exc:
+                logger.warning(
+                    "O-B3: copy_from_upstream failed for binary asset %s: %s",
+                    fp,
+                    exc,
+                )
+                record = FileDecisionRecord(
+                    file_path=fp,
+                    file_status=FileStatus.MODIFIED,
+                    decision=MergeDecision.ESCALATE_HUMAN,
+                    decision_source=DecisionSource.AUTO_EXECUTOR,
+                    confidence=0.0,
+                    rationale=(
+                        f"Binary asset TAKE_TARGET failed ({exc!r}); "
+                        "escalating (O-B3 fallback)."
+                    ),
+                    phase="auto_merge",
+                    agent="binary_asset_router",
+                )
+            state.file_decision_records[fp] = record
+
+        if binary_escalate:
+            binary_marker_set = set(binary_escalate)
+            for fp in binary_escalate:
+                fd_item = file_diffs_map.get(fp)
+                state.file_decision_records[fp] = FileDecisionRecord(
+                    file_path=fp,
+                    file_status=(
+                        fd_item.file_status
+                        if fd_item is not None
+                        else FileStatus.MODIFIED
+                    ),
+                    decision=MergeDecision.ESCALATE_HUMAN,
+                    decision_source=DecisionSource.AUTO_EXECUTOR,
+                    confidence=0.0,
+                    rationale=(
+                        "Binary asset with changes on both sides (category C) — "
+                        "cannot be auto-merged by LLM or text-diff; escalating "
+                        "to human review (O-B3)."
+                    ),
+                    phase="auto_merge",
+                    agent="binary_asset_router",
+                )
+            existing_plan_paths = {
+                item.file_path for item in state.pending_user_decisions
+            }
+            for fp in binary_escalate:
+                if fp in existing_plan_paths:
+                    continue
+                state.pending_user_decisions.append(
+                    UserDecisionItem(
+                        item_id=f"binary_asset_{fp}",
+                        file_path=fp,
+                        description=(
+                            f"Binary asset '{fp}' has conflicting changes on "
+                            "both sides and cannot be diffed by the LLM."
+                        ),
+                        risk_context="binary_asset_both_modified",
+                        current_classification=RiskLevel.HUMAN_REQUIRED.value,
+                        options=[
+                            DecisionOption(
+                                key="take_target",
+                                label="Take upstream",
+                                description="Replace with upstream version as-is",
+                            ),
+                            DecisionOption(
+                                key="take_current",
+                                label="Keep fork",
+                                description="Keep fork version; drop upstream change",
+                            ),
+                            DecisionOption(
+                                key="approve_human",
+                                label="Manual review",
+                                description=(
+                                    "Defer to human reviewer to pick the binary"
+                                ),
+                            ),
+                        ],
+                    )
+                )
+            # Remove these files from their original batches so the main
+            # merge loop skips the LLM call.
+            for batch in state.merge_plan.phases:
+                if batch.risk_level in (RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY):
+                    batch.file_paths = [
+                        fp for fp in batch.file_paths if fp not in binary_marker_set
+                    ]
+
+        if binary_take_target:
+            take_target_set = set(binary_take_target)
+            for batch in state.merge_plan.phases:
+                if batch.risk_level in (RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY):
+                    batch.file_paths = [
+                        fp for fp in batch.file_paths if fp not in take_target_set
+                    ]
 
         # --- Pre-pass: handle HUMAN_REQUIRED and DELETED_ONLY before any merge ---
         # Dedupe: auto_merge may run multiple times (e.g. after conflict
