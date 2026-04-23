@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from abc import ABC, abstractmethod
 from typing import Any
 import anthropic
@@ -67,6 +68,50 @@ class _ModelOverrideContext:
         self._client.model = self._old_model
 
 
+_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+
+
+def _sanitize_surrogates(value: Any) -> Any:
+    """Replace lone UTF-16 surrogate code points that break utf-8 encoding.
+
+    The Anthropic/OpenAI HTTP clients serialize payloads as utf-8; strings that
+    contain unpaired surrogates (often from binary files mis-decoded as text)
+    raise UnicodeEncodeError for the whole request, defeating retries.
+    """
+    if isinstance(value, str):
+        if not _SURROGATE_RE.search(value):
+            return value
+        return _SURROGATE_RE.sub("\ufffd", value)
+    if isinstance(value, dict):
+        return {k: _sanitize_surrogates(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_surrogates(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_surrogates(v) for v in value)
+    return value
+
+
+def _extract_anthropic_text(response: Any) -> str:
+    """Extract visible text from an Anthropic Messages response.
+
+    The ``content`` list may contain blocks of different types (``text``,
+    ``thinking``, ``tool_use``, ...). Newer SDK / extended-thinking responses
+    can place a ``ThinkingBlock`` first, which exposes ``.thinking`` instead of
+    ``.text``. A naive ``response.content[0].text`` access raises
+    AttributeError and aborts the whole retry chain, so iterate the list and
+    collect text blocks while skipping thinking blocks.
+    """
+    parts: list[str] = []
+    for block in getattr(response, "content", []) or []:
+        block_type = getattr(block, "type", None)
+        if block_type == "thinking":
+            continue
+        text = getattr(block, "text", None)
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return "".join(parts)
+
+
 class AnthropicClient(LLMClient):
     def __init__(
         self,
@@ -98,6 +143,8 @@ class AnthropicClient(LLMClient):
         cached_messages, cached_system = apply_cache_markers(
             messages, system=system, strategy=self.cache_strategy
         )
+        cached_messages = _sanitize_surrogates(cached_messages)
+        cached_system = _sanitize_surrogates(cached_system)
         kwargs_merged: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
@@ -109,7 +156,13 @@ class AnthropicClient(LLMClient):
         kwargs_merged.update(kwargs)
 
         response = await self._client.messages.create(**kwargs_merged)
-        return str(response.content[0].text)
+        text = _extract_anthropic_text(response)
+        if not text:
+            stop_reason = getattr(response, "stop_reason", None)
+            raise RuntimeError(
+                f"Anthropic returned no text blocks (stop_reason={stop_reason!r}, model={self.model!r})"
+            )
+        return text
 
     async def complete_structured(
         self,
@@ -175,10 +228,12 @@ class OpenAIClient(LLMClient):
     async def complete(
         self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
     ) -> str:
+        sanitized_messages = _sanitize_surrogates(messages)
+        sanitized_system = _sanitize_surrogates(system)
         all_messages: list[ChatCompletionMessageParam] = []
-        if system:
-            all_messages.append({"role": "system", "content": system})
-        for msg in messages:
+        if sanitized_system:
+            all_messages.append({"role": "system", "content": sanitized_system})
+        for msg in sanitized_messages:
             all_messages.append({"role": msg["role"], "content": msg["content"]})
 
         response = await self._client.chat.completions.create(

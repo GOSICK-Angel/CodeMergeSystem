@@ -82,6 +82,25 @@ class HumanReviewPhase(Phase):
                     checkpoint_tag="judge_rerun",
                 )
 
+        # Guard against O-L1 loop: once judge_review has produced a verdict and
+        # is paused for human adjudication, all conflict human_decision_requests
+        # are already resolved & executed. Falling into Case 1's "not pending"
+        # branch would re-transition to JUDGE_REVIEWING and loop indefinitely.
+        if (
+            state.judge_verdict is not None
+            and state.current_phase == MergePhase.JUDGE_REVIEW
+            and state.judge_resolution is None
+        ):
+            logger.info(
+                "judge_review pending human resolution — staying in AWAITING_HUMAN"
+            )
+            return PhaseOutcome(
+                target_status=SystemStatus.AWAITING_HUMAN,
+                reason="judge verdict requires human resolution (accept/rerun/abort)",
+                checkpoint_tag="judge_resolution_required",
+                extra={"paused": True},
+            )
+
         # Case 1: waiting for file-level conflict decisions from conflict analysis
         if state.human_decision_requests:
             pending = [

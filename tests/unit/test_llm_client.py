@@ -530,3 +530,109 @@ class TestLLMClientFactory:
                 with patch.object(config, "provider", "unknown_provider"):
                     with pytest.raises((ValueError, AttributeError)):
                         LLMClientFactory.create(config)
+
+
+class TestAnthropicThinkingBlockParsing:
+    """O-B1: Anthropic responses may start with a ThinkingBlock that has no
+    ``.text`` attribute. The client must skip it and extract the first text
+    block instead of raising AttributeError on retries."""
+
+    async def test_skips_thinking_block_and_returns_text(self):
+        client = _make_anthropic_client(cache_strategy=CacheStrategy.NONE)
+        thinking_block = MagicMock(spec=["type", "thinking"])
+        thinking_block.type = "thinking"
+        thinking_block.thinking = "let me consider..."
+        text_block = MagicMock(spec=["type", "text"])
+        text_block.type = "text"
+        text_block.text = "final answer"
+        mock_response = MagicMock()
+        mock_response.content = [thinking_block, text_block]
+        client._client.messages.create = AsyncMock(return_value=mock_response)
+
+        result = await client.complete([{"role": "user", "content": "x"}])
+        assert result == "final answer"
+
+    async def test_concatenates_multiple_text_blocks(self):
+        client = _make_anthropic_client(cache_strategy=CacheStrategy.NONE)
+        first = MagicMock(spec=["type", "text"])
+        first.type = "text"
+        first.text = "hello "
+        second = MagicMock(spec=["type", "text"])
+        second.type = "text"
+        second.text = "world"
+        mock_response = MagicMock()
+        mock_response.content = [first, second]
+        client._client.messages.create = AsyncMock(return_value=mock_response)
+
+        result = await client.complete([{"role": "user", "content": "x"}])
+        assert result == "hello world"
+
+    async def test_raises_when_no_text_blocks(self):
+        client = _make_anthropic_client(cache_strategy=CacheStrategy.NONE)
+        thinking_only = MagicMock(spec=["type", "thinking"])
+        thinking_only.type = "thinking"
+        thinking_only.thinking = "only thought"
+        mock_response = MagicMock()
+        mock_response.content = [thinking_only]
+        mock_response.stop_reason = "end_turn"
+        client._client.messages.create = AsyncMock(return_value=mock_response)
+
+        with pytest.raises(RuntimeError, match="no text blocks"):
+            await client.complete([{"role": "user", "content": "x"}])
+
+
+class TestSurrogateSanitization:
+    """O-B2: lone UTF-16 surrogate code points (e.g. ``\\udc89``) must be
+    stripped from outgoing payloads, otherwise the utf-8 HTTP encoder raises
+    UnicodeEncodeError for the whole request and every retry."""
+
+    async def test_anthropic_replaces_surrogates_in_messages(self):
+        client = _make_anthropic_client(cache_strategy=CacheStrategy.NONE)
+        text_block = MagicMock(spec=["type", "text"])
+        text_block.type = "text"
+        text_block.text = "ok"
+        mock_response = MagicMock()
+        mock_response.content = [text_block]
+        client._client.messages.create = AsyncMock(return_value=mock_response)
+
+        dirty = "binary payload \udc89 trailing"
+        await client.complete([{"role": "user", "content": dirty}])
+
+        call_kwargs = client._client.messages.create.call_args.kwargs
+        sent = call_kwargs["messages"][0]["content"]
+        assert "\udc89" not in sent
+        assert "\ufffd" in sent
+
+    async def test_openai_replaces_surrogates_in_system(self):
+        client = _make_openai_client()
+        mock_choice = MagicMock()
+        mock_choice.message.content = "ok"
+        mock_choice.finish_reason = "stop"
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+        client._client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        await client.complete(
+            [{"role": "user", "content": "hi"}],
+            system="preamble \udc89 danger",
+        )
+
+        call_kwargs = client._client.chat.completions.create.call_args.kwargs
+        system_msg = call_kwargs["messages"][0]
+        assert system_msg["role"] == "system"
+        assert "\udc89" not in system_msg["content"]
+        assert "\ufffd" in system_msg["content"]
+
+    async def test_clean_strings_pass_through_unchanged(self):
+        client = _make_anthropic_client(cache_strategy=CacheStrategy.NONE)
+        text_block = MagicMock(spec=["type", "text"])
+        text_block.type = "text"
+        text_block.text = "ok"
+        mock_response = MagicMock()
+        mock_response.content = [text_block]
+        client._client.messages.create = AsyncMock(return_value=mock_response)
+
+        clean = "hello 你好 🙂"
+        await client.complete([{"role": "user", "content": clean}])
+        call_kwargs = client._client.messages.create.call_args.kwargs
+        assert call_kwargs["messages"][0]["content"] == clean

@@ -297,6 +297,123 @@ class TestHumanReviewPhase:
 
         assert outcome.target_status == SystemStatus.FAILED
 
+    @pytest.mark.asyncio
+    async def test_halts_when_judge_verdict_pending_resolution(self):
+        """O-L1 regression: after judge FAIL + dispute exhaustion the phase
+        must stay in AWAITING_HUMAN instead of re-transitioning to
+        JUDGE_REVIEWING via the stale conflict decisions from earlier phases.
+        """
+        from src.models.human import HumanDecisionRequest, DecisionOption
+        from src.models.decision import MergeDecision as MD
+        from src.models.judge import JudgeVerdict, VerdictType
+
+        state = _make_state(status=SystemStatus.AWAITING_HUMAN)
+        state.current_phase = MergePhase.JUDGE_REVIEW
+        state.judge_verdict = JudgeVerdict(
+            verdict=VerdictType.FAIL,
+            reviewed_files_count=1,
+            passed_files=[],
+            failed_files=["a.py"],
+            conditional_files=[],
+            issues=[],
+            critical_issues_count=1,
+            high_issues_count=0,
+            overall_confidence=0.9,
+            summary="fail",
+            blocking_issues=[],
+            timestamp=datetime.now(),
+            judge_model="test",
+        )
+        state.judge_resolution = None
+        resolved_req = HumanDecisionRequest(
+            file_path="a.py",
+            priority=5,
+            conflict_points=[],
+            context_summary="",
+            upstream_change_summary="",
+            fork_change_summary="",
+            analyst_recommendation=MD.TAKE_TARGET,
+            analyst_confidence=0.8,
+            analyst_rationale="",
+            options=[
+                DecisionOption(
+                    option_key="take_target",
+                    decision=MD.TAKE_TARGET,
+                    description="take upstream",
+                )
+            ],
+            created_at=datetime.now(),
+            human_decision=MD.TAKE_TARGET,
+        )
+        state.human_decision_requests = {"a.py": resolved_req}
+
+        ctx = _make_ctx()
+
+        phase = HumanReviewPhase()
+        outcome = await phase.execute(state, ctx)
+
+        assert outcome.target_status == SystemStatus.AWAITING_HUMAN
+        assert outcome.checkpoint_tag == "judge_resolution_required"
+        assert outcome.extra.get("paused") is True
+        ctx.state_machine.transition.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_accept_judge_resolution_transitions_to_report(self):
+        """Complement to O-L1: when judge_resolution=='accept' is present, the
+        phase must transition to GENERATING_REPORT without re-looping through
+        Case 1's conflict-decisions branch."""
+        from src.models.human import HumanDecisionRequest, DecisionOption
+        from src.models.decision import MergeDecision as MD
+        from src.models.judge import JudgeVerdict, VerdictType
+
+        state = _make_state(status=SystemStatus.AWAITING_HUMAN)
+        state.current_phase = MergePhase.JUDGE_REVIEW
+        state.judge_verdict = JudgeVerdict(
+            verdict=VerdictType.FAIL,
+            reviewed_files_count=1,
+            passed_files=[],
+            failed_files=["a.py"],
+            conditional_files=[],
+            issues=[],
+            critical_issues_count=1,
+            high_issues_count=0,
+            overall_confidence=0.9,
+            summary="fail",
+            blocking_issues=[],
+            timestamp=datetime.now(),
+            judge_model="test",
+        )
+        state.judge_resolution = "accept"
+        resolved_req = HumanDecisionRequest(
+            file_path="a.py",
+            priority=5,
+            conflict_points=[],
+            context_summary="",
+            upstream_change_summary="",
+            fork_change_summary="",
+            analyst_recommendation=MD.TAKE_TARGET,
+            analyst_confidence=0.8,
+            analyst_rationale="",
+            options=[
+                DecisionOption(
+                    option_key="take_target",
+                    decision=MD.TAKE_TARGET,
+                    description="take upstream",
+                )
+            ],
+            created_at=datetime.now(),
+            human_decision=MD.TAKE_TARGET,
+        )
+        state.human_decision_requests = {"a.py": resolved_req}
+
+        ctx = _make_ctx()
+
+        phase = HumanReviewPhase()
+        outcome = await phase.execute(state, ctx)
+
+        assert outcome.target_status == SystemStatus.GENERATING_REPORT
+        assert outcome.checkpoint_tag == "judge_accepted"
+
 
 # ---------------------------------------------------------------------------
 # ReportGenerationPhase
