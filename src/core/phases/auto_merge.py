@@ -23,11 +23,14 @@ from src.core.read_only_state_view import ReadOnlyStateView
 from src.models.decision import DecisionSource, FileDecisionRecord, MergeDecision
 from src.models.diff import FileDiff, FileChangeCategory, FileStatus, RiskLevel
 from src.models.dispute import PlanDisputeRequest
+from src.models.human import DecisionOption as HumanDecisionOption
+from src.models.human import HumanDecisionRequest
 from src.models.judge import BatchVerdict
 from src.models.plan import MergePhase, PhaseFileBatch
 from src.models.plan_review import DecisionOption, UserDecisionItem
 from src.models.state import MergeState, PhaseResult, SystemStatus
 from src.tools.commit_replayer import CommitReplayer
+from src.tools.conflict_markers import file_has_conflict_markers
 from src.tools.git_committer import GitCommitter
 
 logger = logging.getLogger(__name__)
@@ -156,6 +159,106 @@ class AutoMergePhase(Phase):
                         phase="auto_merge",
                         agent="commit_replayer",
                     )
+
+        # --- O-M1: scan working tree for files with unresolved conflict
+        # markers (<<<<<<< / ======= / >>>>>>>) left over by cherry-pick
+        # fall-back. Route them directly to human review: skip AUTO_MERGE
+        # and the Judge pipeline, both of which cannot recover from the
+        # markers being part of the stored content. ---
+        repo_path = Path(ctx.git_tool.repo_path)
+        files_with_markers: list[str] = []
+        for batch in state.merge_plan.phases:
+            if batch.risk_level not in (RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY):
+                continue
+            for file_path in batch.file_paths:
+                if file_path in replayed_set:
+                    continue
+                if file_path in state.file_decision_records:
+                    continue
+                if file_has_conflict_markers(repo_path, file_path):
+                    files_with_markers.append(file_path)
+
+        if files_with_markers:
+            logger.warning(
+                "O-M1: %d file(s) contain unresolved conflict markers — "
+                "escalating to human review: %s",
+                len(files_with_markers),
+                ", ".join(files_with_markers[:10])
+                + (" ..." if len(files_with_markers) > 10 else ""),
+            )
+            marker_set = set(files_with_markers)
+            for fp in files_with_markers:
+                fd_item = file_diffs_map.get(fp)
+                state.file_decision_records[fp] = FileDecisionRecord(
+                    file_path=fp,
+                    file_status=(
+                        fd_item.file_status
+                        if fd_item is not None
+                        else FileStatus.MODIFIED
+                    ),
+                    decision=MergeDecision.ESCALATE_HUMAN,
+                    decision_source=DecisionSource.AUTO_EXECUTOR,
+                    confidence=0.0,
+                    rationale=(
+                        "Working tree contains unresolved git conflict "
+                        "markers (<<<<<<< / ======= / >>>>>>>) — cherry-pick "
+                        "fall-back likely left an unresolved merge. Escalated "
+                        "before AUTO_MERGE to avoid feeding markers to Judge/"
+                        "Executor (O-M1)."
+                    ),
+                    phase="auto_merge",
+                    agent="conflict_marker_scanner",
+                )
+            for batch in state.merge_plan.phases:
+                if batch.risk_level in (RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY):
+                    batch.file_paths = [
+                        fp for fp in batch.file_paths if fp not in marker_set
+                    ]
+            existing_plan_paths = {
+                item.file_path for item in state.pending_user_decisions
+            }
+            for fp in files_with_markers:
+                if fp in existing_plan_paths:
+                    continue
+                state.pending_user_decisions.append(
+                    UserDecisionItem(
+                        item_id=f"conflict_markers_{fp}",
+                        file_path=fp,
+                        description=(
+                            f"File '{fp}' contains unresolved git conflict "
+                            "markers from cherry-pick fall-back. Needs human "
+                            "resolution before merge can proceed."
+                        ),
+                        risk_context="unresolved_conflict_markers",
+                        current_classification=RiskLevel.HUMAN_REQUIRED.value,
+                        options=[
+                            DecisionOption(
+                                key="approve_human",
+                                label="Manual review",
+                                description=(
+                                    "You will resolve the conflict markers by "
+                                    "hand before continuing"
+                                ),
+                            ),
+                            DecisionOption(
+                                key="take_target",
+                                label="Take upstream",
+                                description=(
+                                    "Replace the conflicted file with the "
+                                    "upstream version as-is"
+                                ),
+                            ),
+                            DecisionOption(
+                                key="take_current",
+                                label="Keep fork",
+                                description=(
+                                    "Keep the fork version and drop the "
+                                    "upstream change for this file"
+                                ),
+                            ),
+                        ],
+                    )
+                )
 
         # --- Pre-pass: handle HUMAN_REQUIRED and DELETED_ONLY before any merge ---
         # Dedupe: auto_merge may run multiple times (e.g. after conflict
@@ -432,6 +535,18 @@ class AutoMergePhase(Phase):
                         layer_id,
                         max_dispute,
                     )
+                    # O-L3: create real HumanDecisionRequest entries for the
+                    # stuck files so HumanReviewPhase.Case 1 can drive them
+                    # through the normal pending-decisions flow. Also record
+                    # the exhausted layer so the review phase never bounces
+                    # the run back into AUTO_MERGING (that was the O-L3 loop).
+                    self._register_dispute_exhaustion(
+                        state=state,
+                        layer_id=layer_id,
+                        layer_files=layer_files,
+                        batch_verdict=batch_verdict,
+                        max_dispute=max_dispute,
+                    )
                     ctx.state_machine.transition(
                         state,
                         SystemStatus.AWAITING_HUMAN,
@@ -586,6 +701,103 @@ class AutoMergePhase(Phase):
                 reason="no risky files, skip to judge review",
                 checkpoint_tag="after_phase2",
                 memory_phase="auto_merge",
+            )
+
+    def _register_dispute_exhaustion(
+        self,
+        state: MergeState,
+        layer_id: int | None,
+        layer_files: list[str],
+        batch_verdict: BatchVerdict,
+        max_dispute: int,
+    ) -> None:
+        """O-L3: persist a proper AWAITING_HUMAN signal after batch judge
+        dispute exhaustion so the run does not loop.
+
+        Writes:
+        * one ``HumanDecisionRequest`` per file in the stuck batch (unless one
+          already exists), so ``HumanReviewPhase.Case 1`` drives the user
+          through normal pending-decisions flow;
+        * the exhausted ``layer_id`` onto
+          ``state.auto_merge_dispute_exhausted_layers`` so
+          ``HumanReviewPhase.Case 2`` refuses to bounce the run back into
+          ``AUTO_MERGING`` after the user provides decisions.
+        """
+
+        layer_tag = "None" if layer_id is None else str(layer_id)
+        if layer_tag not in state.auto_merge_dispute_exhausted_layers:
+            state.auto_merge_dispute_exhausted_layers.append(layer_tag)
+
+        issues_by_file: dict[str, list[str]] = defaultdict(list)
+        for issue in batch_verdict.issues:
+            level = (
+                issue.issue_level.value
+                if hasattr(issue.issue_level, "value")
+                else str(issue.issue_level)
+            )
+            issues_by_file[issue.file_path].append(
+                f"[{level}] {issue.issue_type}: {issue.description}"
+            )
+
+        now = datetime.now()
+        for file_path in layer_files:
+            if file_path in state.human_decision_requests:
+                continue
+            issue_lines = issues_by_file.get(file_path, [])
+            summary_blob = (
+                "\n".join(issue_lines)
+                if issue_lines
+                else (
+                    "Judge did not converge on this file within "
+                    f"{max_dispute} dispute rounds."
+                )
+            )
+            state.human_decision_requests[file_path] = HumanDecisionRequest(
+                file_path=file_path,
+                priority=5,
+                conflict_points=[],
+                context_summary=(
+                    f"AUTO_MERGE layer {layer_tag} batch judge sub-review did "
+                    f"not reach consensus after {max_dispute} dispute rounds "
+                    f"(O-L3). Executor's repairs did not resolve all "
+                    "remaining blocking issues."
+                ),
+                upstream_change_summary=(
+                    "(see Judge issues summary in options.preview_content)"
+                ),
+                fork_change_summary=(
+                    "(see Judge issues summary in options.preview_content)"
+                ),
+                analyst_recommendation=MergeDecision.ESCALATE_HUMAN,
+                analyst_confidence=0.0,
+                analyst_rationale=(
+                    f"{len(issue_lines)} remaining Judge issue(s) after "
+                    f"{max_dispute} dispute rounds"
+                ),
+                options=[
+                    HumanDecisionOption(
+                        option_key="approve_merge",
+                        decision=MergeDecision.SEMANTIC_MERGE,
+                        description=(
+                            "Accept the current merged content as-is "
+                            "(advisory issues only)."
+                        ),
+                        preview_content=summary_blob,
+                    ),
+                    HumanDecisionOption(
+                        option_key="take_target",
+                        decision=MergeDecision.TAKE_TARGET,
+                        description="Replace with the upstream version as-is.",
+                        preview_content=summary_blob,
+                    ),
+                    HumanDecisionOption(
+                        option_key="take_current",
+                        decision=MergeDecision.TAKE_CURRENT,
+                        description="Keep the fork version; drop upstream change.",
+                        preview_content=summary_blob,
+                    ),
+                ],
+                created_at=now,
             )
 
     async def _execute_batch(

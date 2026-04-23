@@ -204,6 +204,28 @@ class HumanReviewPhase(Phase):
                 ),
             )
             if state.plan_human_review.decision == PlanHumanDecision.APPROVE:
+                # O-L3 guard: if AUTO_MERGE previously exhausted its dispute
+                # budget for one or more batches, do NOT bounce back into
+                # AUTO_MERGING. Route to JUDGE_REVIEWING so the final verdict
+                # reflects whatever was merged plus user resolutions; the
+                # state machine's own guards will decide next step.
+                if state.auto_merge_dispute_exhausted_layers:
+                    logger.info(
+                        "auto_merge dispute exhausted for layers %s — "
+                        "routing to JUDGE_REVIEWING instead of AUTO_MERGING",
+                        state.auto_merge_dispute_exhausted_layers,
+                    )
+                    ctx.state_machine.transition(
+                        state,
+                        SystemStatus.JUDGE_REVIEWING,
+                        "auto_merge dispute exhausted; skip re-entry to AUTO_MERGING",
+                    )
+                    return PhaseOutcome(
+                        target_status=SystemStatus.JUDGE_REVIEWING,
+                        reason="auto_merge dispute exhausted",
+                        checkpoint_tag="after_auto_merge_exhausted",
+                        memory_phase="auto_merge",
+                    )
                 ctx.state_machine.transition(
                     state,
                     SystemStatus.AUTO_MERGING,

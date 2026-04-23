@@ -572,6 +572,13 @@ class MergeConfig(BaseModel):
         "Executor's repair closed the previously-reported issues and does not "
         "introduce brand-new issues (those roll to meta-review as out-of-scope).",
     )
+    judge_blocking_levels: list[str] = Field(
+        default_factory=lambda: ["critical", "high"],
+        description="O-M2: issue severities that block a BatchVerdict from "
+        "being approved. Issues at other levels (medium/low/info) are recorded "
+        "as advisories and do not prevent consensus. Must be subset of "
+        "{critical, high, medium, low, info}.",
+    )
     chunk_size_chars: int = Field(
         default=20000,
         ge=5000,

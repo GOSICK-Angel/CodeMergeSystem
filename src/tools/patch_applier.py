@@ -2,6 +2,7 @@ from datetime import datetime
 from src.models.decision import FileDecisionRecord, MergeDecision, DecisionSource
 from src.models.diff import FileStatus
 from src.models.state import MergeState
+from src.tools.conflict_markers import has_conflict_markers
 from src.tools.git_tool import GitTool
 
 
@@ -21,6 +22,26 @@ async def apply_with_snapshot(
     original: str | None = None
     if abs_path.exists():
         original = abs_path.read_text(encoding="utf-8")
+
+    if has_conflict_markers(new_content):
+        return FileDecisionRecord(
+            file_path=file_path,
+            file_status=FileStatus.MODIFIED,
+            decision=MergeDecision.ESCALATE_HUMAN,
+            decision_source=DecisionSource.AUTO_EXECUTOR,
+            confidence=0.0,
+            rationale=(
+                "Unresolved conflict markers (<<<<<<< / ======= / >>>>>>>) "
+                "detected in proposed content — escalating to human review "
+                "without writing the file (O-M1)."
+            ),
+            original_snapshot=original,
+            phase=phase,
+            agent=agent,
+            timestamp=datetime.now(),
+            is_rolled_back=False,
+            rollback_reason="conflict_markers_in_proposed_content",
+        )
 
     try:
         abs_path.parent.mkdir(parents=True, exist_ok=True)

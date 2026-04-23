@@ -1049,6 +1049,63 @@ class JudgeAgent(BaseAgent):
 
     _BATCH_SIZE = 8
 
+    _DEFAULT_BLOCKING_LEVELS: frozenset[str] = frozenset({"critical", "high"})
+
+    def _compute_batch_approved(
+        self,
+        issues: list[JudgeIssue],
+        state: "ReadOnlyStateView",
+        llm_opinion: object | None = None,
+    ) -> bool:
+        """O-M2: decide whether a batch verdict is approved.
+
+        Blocking criteria (any one of these forbids approval):
+          1. An issue with ``must_fix_before_merge=True``
+             (preserves deterministic checks like the ``<<<<<<<`` marker scan).
+          2. An issue whose ``issue_level`` is in
+             ``config.judge_blocking_levels`` (default: critical, high).
+          3. The LLM explicitly returned ``overall_approved=false``
+             AND at least one remaining issue sits at a blocking level.
+
+        Issues at non-blocking levels (medium/low/info) are treated as
+        advisories: they do not prevent consensus on their own.
+        """
+        cfg_levels = getattr(state.config, "judge_blocking_levels", None)
+        blocking_levels: frozenset[str]
+        if cfg_levels:
+            blocking_levels = frozenset(str(x).lower() for x in cfg_levels)
+        else:
+            blocking_levels = self._DEFAULT_BLOCKING_LEVELS
+
+        for issue in issues:
+            if issue.must_fix_before_merge:
+                return False
+            level = (
+                issue.issue_level.value
+                if hasattr(issue.issue_level, "value")
+                else str(issue.issue_level)
+            )
+            if level.lower() in blocking_levels:
+                return False
+
+        # LLM opinion only forces non-approval when blocking-level issues exist.
+        if llm_opinion is not None and bool(llm_opinion) is False:
+            has_blocking_level = any(
+                (
+                    (
+                        i.issue_level.value
+                        if hasattr(i.issue_level, "value")
+                        else str(i.issue_level)
+                    ).lower()
+                    in blocking_levels
+                )
+                for i in issues
+            )
+            if has_blocking_level:
+                return False
+
+        return True
+
     def _review_file_deterministic(
         self,
         file_path: str,
@@ -1201,8 +1258,7 @@ class JudgeAgent(BaseAgent):
             else 0,
         )
 
-        blocking = [i for i in all_issues if i.must_fix_before_merge]
-        approved = len(blocking) == 0
+        approved = self._compute_batch_approved(all_issues, state)
         repair_instructions = (
             self.build_repair_instructions(all_issues) if not approved else []
         )
@@ -1263,7 +1319,15 @@ class JudgeAgent(BaseAgent):
             if status == "maintained" and issue_id in issue_map:
                 remaining_issues.append(issue_map[issue_id])
 
-        approved: bool = bool(data.get("overall_approved", len(remaining_issues) == 0))
+        # O-M2: even if LLM claims overall_approved=true, any remaining issue
+        # whose severity is in the configured blocking levels must block the
+        # verdict. Conversely, LLM saying "not approved" over only info/low
+        # issues should not block either.
+        approved = self._compute_batch_approved(
+            remaining_issues,
+            state,
+            llm_opinion=data.get("overall_approved"),
+        )
         repair_instructions = (
             self.build_repair_instructions(remaining_issues) if not approved else []
         )

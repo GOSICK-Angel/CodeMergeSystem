@@ -96,6 +96,16 @@ class MergeState(BaseModel):
     )
     human_decisions: dict[str, MergeDecision] = Field(default_factory=dict)
 
+    auto_merge_dispute_exhausted_layers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "O-L3: layer ids (stringified; 'None' for global) whose batch "
+            "judge sub-review could not reach consensus within "
+            "max_dispute_rounds. HumanReviewPhase must NOT transition these "
+            "back to AUTO_MERGING, otherwise the phase loops forever."
+        ),
+    )
+
     judge_verdict: JudgeVerdict | None = None
     judge_repair_rounds: int = 0
     judge_verdicts_log: list[dict[str, Any]] = Field(default_factory=list)
