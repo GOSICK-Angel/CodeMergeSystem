@@ -1,8 +1,9 @@
 import asyncio
+import os
 import sys
 from pathlib import Path
 from rich.console import Console
-from src.models.config import MergeConfig
+from src.models.config import AgentLLMConfig, MergeConfig
 from src.models.state import MergeState, SystemStatus
 from src.core.orchestrator import Orchestrator
 from src.core.phases.base import ActivityEvent
@@ -17,6 +18,29 @@ from src.tools.ci_reporter import build_ci_summary, format_ci_summary
 
 
 console = Console()
+
+
+def _preflight_check_api_keys(config: MergeConfig) -> None:
+    """O-1/O-5: Warn early if required API key environment variables are missing."""
+    checked: set[str] = set()
+
+    def _check_agent_cfg(agent_name: str, cfg: AgentLLMConfig) -> None:
+        for env_var in cfg.api_key_env_list:
+            if env_var in checked:
+                continue
+            checked.add(env_var)
+            if not os.environ.get(env_var):
+                console.print(
+                    f"[yellow]Warning: {env_var} is not set "
+                    f"(required by agent '{agent_name}'). "
+                    f"Provider: {cfg.provider}/{cfg.model}[/yellow]"
+                )
+        if cfg.fallback is not None:
+            _check_agent_cfg(f"{agent_name}.fallback", cfg.fallback)
+
+    for field_name in config.agents.model_fields:
+        agent_cfg: AgentLLMConfig = getattr(config.agents, field_name)
+        _check_agent_cfg(field_name, agent_cfg)
 
 
 def _handle_ci_exit(final_state: MergeState) -> None:
@@ -47,6 +71,8 @@ def run_command_impl(
 ) -> None:
     if dry_run and not ci:
         console.print("[yellow]Dry run mode: will analyze but not merge[/yellow]")
+
+    _preflight_check_api_keys(config)
 
     state = MergeState(config=config)
     if not ci:

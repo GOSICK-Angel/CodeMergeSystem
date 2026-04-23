@@ -28,11 +28,20 @@ class HumanReviewPhase(Phase):
     async def execute(self, state: MergeState, ctx: PhaseContext) -> PhaseOutcome:
         logger.info("Entering AWAITING_HUMAN status")
 
+        # O-6: if conflict decisions are still pending, go to Case 1 first.
+        _has_pending_conflict_decisions = bool(
+            state.human_decision_requests
+            and any(
+                r.human_decision is None for r in state.human_decision_requests.values()
+            )
+        )
+
         # Case 0: judge review already ran and paused for human acknowledgement.
         # If the user set `state.judge_resolution` via the CLI (resume
         # --decisions), route accordingly so --no-tui users are not deadlocked.
         if (
-            state.judge_verdict is not None
+            not _has_pending_conflict_decisions
+            and state.judge_verdict is not None
             and state.current_phase == MergePhase.JUDGE_REVIEW
             and state.judge_resolution is not None
         ):

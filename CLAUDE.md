@@ -101,7 +101,9 @@ Branches: `feature/<name>`, `fix/<name>`, `chore/<name>`. PRs squash-merged into
 
 ## Testing Notes
 
-`asyncio_mode = "auto"` is set globally — all async test functions run without explicit `@pytest.mark.asyncio`. Integration tests mock LLM calls via `patch_llm_factory` fixture; avoid real API calls in unit tests.
+`asyncio_mode = "auto"` is set globally — all async test functions run without explicit `@pytest.mark.asyncio`. Unit tests use `patch_llm_factory` to mock LLM calls; integration tests (`tests/integration/`) make real API calls and require valid `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
+
+80% coverage is enforced in CI (`--cov-fail-under=80`). Run locally with `pytest tests/unit/ --cov=src --cov-report=term-missing`.
 
 ## Code Style
 

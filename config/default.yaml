@@ -5,6 +5,7 @@ repo_path: "."
 project_context: "Example project context"
 max_files_per_run: 500
 max_plan_revision_rounds: 2
+max_dispute_rounds: 1  # O-3: lower when Executor is unreliable (default 2)
 
 llm:
   provider: "anthropic"
@@ -28,6 +29,11 @@ agents:
     max_tokens: 8192
     max_retries: 3
     api_key_env: "OPENAI_API_KEY"
+    # O-1/O-5: uncomment to enable Anthropic fallback when OpenAI circuit breaker opens
+    # fallback:
+    #   provider: "anthropic"
+    #   model: "claude-haiku-4-5-20251001"
+    #   api_key_env: "ANTHROPIC_API_KEY"
   conflict_analyst:
     provider: "anthropic"
     model: "claude-sonnet-4-6"
@@ -42,6 +48,11 @@ agents:
     max_tokens: 8192
     max_retries: 3
     api_key_env: "OPENAI_API_KEY"
+    # O-1/O-5: uncomment to enable Anthropic fallback when OpenAI circuit breaker opens
+    # fallback:
+    #   provider: "anthropic"
+    #   model: "claude-haiku-4-5-20251001"
+    #   api_key_env: "ANTHROPIC_API_KEY"
   judge:
     provider: "anthropic"
     model: "claude-opus-4-6"

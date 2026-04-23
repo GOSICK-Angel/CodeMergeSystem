@@ -7,5 +7,18 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:api.github.com)"
     ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git status --short 2>/dev/null | grep -q '\\.py$' && echo 'Python files modified — run /verify before committing.' || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }

@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from datetime import datetime
+from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
-from typing import Any, Literal
 
 
 class CompressionConfig(BaseModel):
@@ -36,6 +38,11 @@ class AgentLLMConfig(BaseModel):
         description="Per-request HTTP timeout in seconds passed to the LLM SDK.",
     )
     compression: CompressionConfig = Field(default_factory=CompressionConfig)
+    fallback: Optional[AgentLLMConfig] = Field(
+        default=None,
+        description="O-1/O-5: Optional fallback provider config activated when the "
+        "primary provider's circuit breaker opens after consecutive failures.",
+    )
 
     @property
     def api_key_env_list(self) -> list[str]:
@@ -43,6 +50,9 @@ class AgentLLMConfig(BaseModel):
         if isinstance(self.api_key_env, list):
             return self.api_key_env
         return [self.api_key_env]
+
+
+AgentLLMConfig.model_rebuild()
 
 
 class AgentsLLMConfig(BaseModel):

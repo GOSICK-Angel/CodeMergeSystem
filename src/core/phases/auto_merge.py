@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from src.agents.base_agent import CIRCUIT_BREAKER_THRESHOLD
 from src.agents.executor_agent import ExecutorAgent
 from src.agents.judge_agent import JudgeAgent
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
@@ -384,6 +385,19 @@ class AutoMergePhase(Phase):
 
                 for dispute_round in range(max_dispute):
                     if batch_verdict.approved:
+                        ctx.checkpoint.save(
+                            state, f"phase2_layer_{layer_id}_batch_approved"
+                        )
+                        break
+
+                    # O-2: skip remaining dispute rounds if executor circuit breaker is open
+                    if executor.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
+                        logger.warning(
+                            "Executor circuit breaker OPEN after %d failures — "
+                            "aborting dispute rounds for layer %s",
+                            executor.consecutive_failures,
+                            layer_id,
+                        )
                         break
 
                     rebuttal = await executor.build_rebuttal(
@@ -572,15 +586,14 @@ class AutoMergePhase(Phase):
         replayed_set: set[str],
         state: MergeState,
     ) -> list[str]:
-        changed_files: list[str] = []
-        for file_path in batch.file_paths:
+        async def _process_one(file_path: str) -> str | None:
             if file_path in replayed_set:
-                continue
+                return None
             if file_path in state.file_decision_records:
                 existing = state.file_decision_records[file_path]
                 if existing.decision != MergeDecision.ESCALATE_HUMAN:
-                    changed_files.append(file_path)
-                continue
+                    return file_path
+                return None
 
             category = batch.change_category
             if category is None:
@@ -590,17 +603,28 @@ class AutoMergePhase(Phase):
             if category == FileChangeCategory.D_MISSING:
                 record = await executor._copy_from_upstream(file_path, state)
                 state.file_decision_records[file_path] = record
-                changed_files.append(file_path)
-                continue
+                return file_path
 
             fd_item: FileDiff | None = file_diffs_map.get(file_path)
             if fd_item is None:
-                continue
+                return None
 
             strategy = executor._select_strategy_by_category(category, batch.risk_level)
             record = await executor.execute_auto_merge(fd_item, strategy, state)
             state.file_decision_records[file_path] = record
-            changed_files.append(file_path)
+            return file_path
+
+        results = await asyncio.gather(
+            *[_process_one(fp) for fp in batch.file_paths],
+            return_exceptions=True,
+        )
+
+        changed_files: list[str] = []
+        for fp, result in zip(batch.file_paths, results):
+            if isinstance(result, Exception):
+                logger.error("Batch file processing error for %s: %s", fp, result)
+            elif result is not None:
+                changed_files.append(result)
 
         return changed_files
 

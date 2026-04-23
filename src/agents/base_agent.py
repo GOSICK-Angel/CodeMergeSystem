@@ -104,6 +104,12 @@ class BaseAgent(ABC):
         self._current_phase: str = ""
         self._hooks: HookManager | None = None
         self._contract: Any | None = None
+        self._fallback_llm: LLMClient | None = (
+            LLMClientFactory.create(llm_config.fallback)
+            if llm_config.fallback is not None
+            else None
+        )
+        self._using_fallback: bool = False
 
     @property
     def contract(self) -> Any | None:
@@ -309,6 +315,26 @@ class BaseAgent(ABC):
         json_mode: bool = False,
     ) -> str | BaseModel:
         if self._consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
+            if self._fallback_llm is not None and not self._using_fallback:
+                self.logger.warning(
+                    "Circuit breaker OPEN for %s (%d failures) — switching to fallback provider %s/%s",
+                    self.agent_type.value,
+                    self._consecutive_failures,
+                    self.llm_config.fallback.provider,  # type: ignore[union-attr]
+                    self.llm_config.fallback.model,  # type: ignore[union-attr]
+                )
+                self._using_fallback = True
+                saved_llm, saved_config = self.llm, self.llm_config
+                self.llm = self._fallback_llm
+                self.llm_config = self.llm_config.fallback  # type: ignore[assignment]
+                self._consecutive_failures = 0
+                try:
+                    return await self._call_llm_with_retry(
+                        messages, system, schema, max_retries, json_mode
+                    )
+                finally:
+                    self.llm, self.llm_config = saved_llm, saved_config
+                    self._using_fallback = False
             self.logger.error(
                 "Circuit breaker OPEN: %d consecutive failures for %s, refusing call",
                 self._consecutive_failures,
