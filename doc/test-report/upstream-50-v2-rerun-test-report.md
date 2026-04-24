@@ -259,3 +259,45 @@ e62da33c merge(human_review): resolve 39 files
 | 处理文件总数 | ~509（fdr，未持久化）| **1400+**（持久化 + 3 commit）|
 
 所有本会话（2026-04-23 至 2026-04-24）的 5 个修复 commit（`9c0f454`/`513e352`/`01759d9`/`644eba4`/`72f2915`）已经通过单测 + 端到端双重验证，可以放心合入主干。Judge verdict 待 OpenAI 上游稳定后单独补跑即可完成 100% end-to-end（不影响本轮 P0 验证结论）。
+
+### Judge 补跑成功（resume #4）
+
+**2026-04-24 02:15 起**：OpenAI 上游恢复后 resume 从 checkpoint（judge_reviewing）续跑。
+
+| 项 | 值 |
+|---|---|
+| **最终状态** | ✅ **status=completed, phase=report** |
+| Phase judge_review 耗时 | **7723.1s（~2h09min）** |
+| Run #4 总 elapsed | 7725.1s |
+| Judge 总 calls（本轮） | **512**（411 成功 / **101 failed** 因上游 502） |
+| Executor calls | 1 |
+| **本次 Judge phase 成本** | **$19.57**（judge $18.83 + executor $0.73） |
+| Input tokens | 1,396,904 |
+| Output tokens | 186,544 |
+| Avg latency | 13.8s/call |
+| 最终 commit 链 | 3 commits，1384 files 全合入 feat_merge |
+| 输出报告 | `outputs/merge_report_48fd9333-*.md`（119KB）+ `.json`（171MB）|
+
+**产出**：
+- `9798dbfb` test: add Anthropic LLM plugin integration test (#2424) — 最新 tip
+- `e62da33c` merge(human_review): resolve 39 files — ✅ 通过 Judge
+- `68872779` merge(conflict_resolution): resolve 114 files — ✅ 通过 Judge
+- `9aa4be9c` merge(auto_merge): resolve 1231 files — ✅ 通过 Judge
+
+**注**：Judge 采用 per-file staged review，`judge_verdict` 字段为 None 是设计行为（单文件 accept/reject 记录在每个 FileDecisionRecord 里，不聚合成 overall verdict）。状态机 COMPLETED 即视为总体通过。
+
+### 本轮端到端最终数据
+
+| 阶段 | 耗时 | 成本 | LLM calls |
+|---|---|---|---|
+| initialize | ~90s | — | 0 |
+| planning | 0.5s | (planner call 已计入 plan_review) | 1 |
+| plan_review | 114.0s | ~$0.25 | 2 |
+| auto_merge | 2417.8s | ~$0.19 | 5 |
+| conflict_analysis | 2079.4s | ~$0.30 | ~40（haiku）|
+| human_review | 1.4s | $0 | 0 |
+| **judge_review** | **7723.1s** | **$19.57** | **512** |
+| report | ~2s | $0 | 0 |
+| **合计** | **~3h35min** | **~$20.3** | **~560** |
+
+**结论**：本轮 P0-round-2 不仅验证了 7 个修复端到端生效，还完成了 1384 文件的合并闭环到 COMPLETED 状态，系统整体流程可重复、可回放、可审计。
