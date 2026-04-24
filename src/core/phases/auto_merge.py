@@ -499,6 +499,104 @@ class AutoMergePhase(Phase):
                 memory_phase="auto_merge",
             )
 
+        # O-L5: execute UserDecisionItem take_target / take_current choices.
+        # Previously these user selections updated state but never wrote any
+        # file — downstream pipelines saw the ESCALATE_HUMAN record that O-M1
+        # / O-B3 seeded and the working tree was never updated. We now
+        # actualize the choice here, overwrite file_decision_records, and
+        # remove the file from future batches.
+        _l5_take_target_keys = {"take_target"}
+        _l5_take_current_keys = {"take_current"}
+        _l5_applied: set[str] = set()
+        for item in state.pending_user_decisions:
+            if item.user_choice not in _l5_take_target_keys | _l5_take_current_keys:
+                continue
+            fp = item.file_path
+            if fp in _l5_applied:
+                continue
+            ref = (
+                state.config.upstream_ref
+                if item.user_choice in _l5_take_target_keys
+                else state.config.fork_ref
+            )
+            decision_value = (
+                MergeDecision.TAKE_TARGET
+                if item.user_choice in _l5_take_target_keys
+                else MergeDecision.TAKE_CURRENT
+            )
+            try:
+                if is_binary_asset(fp):
+                    from src.tools.patch_applier import apply_bytes_with_snapshot
+
+                    content_bytes = ctx.git_tool.get_file_bytes(ref, fp)
+                    if content_bytes is None:
+                        raise RuntimeError(f"{ref}:{fp} bytes not found")
+                    record = await apply_bytes_with_snapshot(
+                        fp,
+                        content_bytes,
+                        ctx.git_tool,
+                        state,
+                        phase="auto_merge",
+                        agent="user_choice_executor",
+                        decision=decision_value,
+                        rationale=(
+                            f"O-L5: executing user_choice={item.user_choice!r} "
+                            f"for {item.risk_context or item.item_id} via "
+                            "binary-safe path"
+                        ),
+                    )
+                else:
+                    from src.tools.patch_applier import apply_with_snapshot
+
+                    content = ctx.git_tool.get_file_content(ref, fp)
+                    if content is None:
+                        raise RuntimeError(f"{ref}:{fp} content not found")
+                    record = await apply_with_snapshot(
+                        fp,
+                        content,
+                        ctx.git_tool,
+                        state,
+                        phase="auto_merge",
+                        agent="user_choice_executor",
+                        decision=decision_value,
+                        rationale=(
+                            f"O-L5: executing user_choice={item.user_choice!r} "
+                            f"for {item.risk_context or item.item_id}"
+                        ),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "O-L5: failed to execute user_choice=%s for %s: %s",
+                    item.user_choice,
+                    fp,
+                    exc,
+                )
+                record = FileDecisionRecord(
+                    file_path=fp,
+                    file_status=FileStatus.MODIFIED,
+                    decision=MergeDecision.ESCALATE_HUMAN,
+                    decision_source=DecisionSource.AUTO_EXECUTOR,
+                    confidence=0.0,
+                    rationale=(
+                        f"O-L5 execute user_choice={item.user_choice!r} failed "
+                        f"({exc!r}); keeping ESCALATE_HUMAN."
+                    ),
+                    phase="auto_merge",
+                    agent="user_choice_executor",
+                )
+            state.file_decision_records[fp] = record
+            _l5_applied.add(fp)
+
+        if _l5_applied:
+            logger.info(
+                "O-L5: executed user_choice for %d file(s) (take_target/take_current)",
+                len(_l5_applied),
+            )
+            for batch in state.merge_plan.phases:
+                batch.file_paths = [
+                    fp for fp in batch.file_paths if fp not in _l5_applied
+                ]
+
         # All plan-level decisions filled in: apply downgrades so the main
         # loop actually processes HUMAN_REQUIRED files the user downgraded.
         # Split each HUMAN_REQUIRED batch into:

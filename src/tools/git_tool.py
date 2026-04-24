@@ -115,6 +115,42 @@ class GitTool:
     def stage_file(self, file_path: str) -> None:
         self.repo.index.add([file_path])
 
+    def reload_index(self) -> None:
+        """Re-read `.git/index` from disk. Needed after we use CLI
+        (`git add`, `git rm --cached`) that bypasses the GitPython
+        IndexFile cache; without this `repo.index.commit()` still sees
+        the stale (unmerged) entries and raises UnmergedEntriesError."""
+        try:
+            # `Repo.index` is a read-only property in the public typeshed
+            # but GitPython stores the backing IndexFile on `_index`.
+            # Replacing it forces a fresh read on next attribute access.
+            self.repo._index = git.IndexFile(self.repo)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    def get_unmerged_files(self) -> list[str]:
+        """Return paths that have unmerged index entries (stages 1/2/3),
+        i.e. leftover conflicts from cherry-pick / merge fallback. Returns
+        each path once even if multiple stages are present.
+
+        `git ls-files -u` output format: `<mode> <sha> <stage>\\t<path>`.
+        We do not use `--name-only` because it is not supported on older
+        git versions that still ship in many CI images."""
+        try:
+            output = self.repo.git.ls_files("-u")
+        except git.GitCommandError:
+            return []
+        seen: set[str] = set()
+        result: list[str] = []
+        for line in output.splitlines():
+            if "\t" not in line:
+                continue
+            path = line.split("\t", 1)[1].strip()
+            if path and path not in seen:
+                seen.add(path)
+                result.append(path)
+        return result
+
     def get_status(self) -> list[tuple[str, str]]:
         status_output = self.repo.git.status("--porcelain")
         results: list[tuple[str, str]] = []

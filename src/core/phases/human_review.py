@@ -129,6 +129,76 @@ class HumanReviewPhase(Phase):
                     executed,
                 )
 
+                # O-B4-e2e-gap: if AUTO_MERGE was skipped on resume (phase
+                # was already awaiting_human), any binary files still in
+                # merge_plan without a file_decision_record never got their
+                # O-B4 bytes path. Catch them up here so commit doesn't
+                # leave the working tree in a half-merged state.
+                if state.merge_plan is not None:
+                    from src.tools.binary_assets import is_binary_asset
+                    from src.tools.patch_applier import apply_bytes_with_snapshot
+
+                    binary_catchup: list[str] = []
+                    for batch in state.merge_plan.phases:
+                        for fp in batch.file_paths:
+                            if fp in state.file_decision_records:
+                                continue
+                            if not is_binary_asset(fp):
+                                continue
+                            binary_catchup.append(fp)
+                    if binary_catchup:
+                        logger.info(
+                            "O-B4-e2e-gap: catching up %d binary asset(s) "
+                            "that missed AUTO_MERGE on this resume",
+                            len(binary_catchup),
+                        )
+                        from src.models.decision import (
+                            DecisionSource,
+                            FileDecisionRecord,
+                            MergeDecision,
+                        )
+                        from src.models.diff import FileStatus
+
+                        for fp in binary_catchup:
+                            try:
+                                content_bytes = ctx.git_tool.get_file_bytes(
+                                    state.config.upstream_ref, fp
+                                )
+                                if content_bytes is None:
+                                    raise RuntimeError("upstream bytes not found")
+                                record = await apply_bytes_with_snapshot(
+                                    fp,
+                                    content_bytes,
+                                    ctx.git_tool,
+                                    state,
+                                    phase="human_review",
+                                    agent="binary_asset_catchup",
+                                    decision=MergeDecision.TAKE_TARGET,
+                                    rationale=(
+                                        "O-B4-e2e-gap: binary TAKE_TARGET "
+                                        "catch-up after AUTO_MERGE skip."
+                                    ),
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "O-B4-e2e-gap catch-up failed for %s: %s",
+                                    fp,
+                                    exc,
+                                )
+                                record = FileDecisionRecord(
+                                    file_path=fp,
+                                    file_status=FileStatus.MODIFIED,
+                                    decision=MergeDecision.ESCALATE_HUMAN,
+                                    decision_source=DecisionSource.AUTO_EXECUTOR,
+                                    confidence=0.0,
+                                    rationale=(
+                                        f"O-B4-e2e-gap catch-up failed ({exc!r})"
+                                    ),
+                                    phase="human_review",
+                                    agent="binary_asset_catchup",
+                                )
+                            state.file_decision_records[fp] = record
+
                 if ctx.config.history.enabled and ctx.config.history.commit_after_phase:
                     human_files = [
                         req.file_path
