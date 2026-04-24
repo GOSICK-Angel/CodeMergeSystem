@@ -378,6 +378,140 @@ async def test_human_review_normal_plan_approve_still_goes_to_auto_merging():
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# O-L4: resume.py item_decisions injection + HumanReviewPhase safety-net
+# when AUTO_MERGE appends new undecided items after plan approval.
+# --------------------------------------------------------------------------
+
+
+def _make_pending_item(file_path: str, choice: str | None = None):
+    from src.models.plan_review import (
+        DecisionOption as PlanDecisionOption,
+    )
+    from src.models.plan_review import (
+        UserDecisionItem,
+    )
+
+    return UserDecisionItem(
+        item_id=f"conflict_markers_{file_path}",
+        file_path=file_path,
+        description=f"File '{file_path}' contains unresolved conflict markers",
+        risk_context="unresolved_conflict_markers",
+        current_classification="HUMAN_REQUIRED",
+        options=[
+            PlanDecisionOption(key="approve_human", label="Manual"),
+            PlanDecisionOption(key="take_target", label="Take upstream"),
+            PlanDecisionOption(key="take_current", label="Keep fork"),
+        ],
+        user_choice=choice,
+    )
+
+
+def test_resume_item_decisions_injected_after_plan_approved(tmp_path, monkeypatch):
+    """O-L4: resume must honor item_decisions even when plan_human_review
+    is already APPROVE (e.g. AUTO_MERGE appended new conflict_markers_* items
+    mid-flight)."""
+    import yaml
+
+    from src.cli.commands import resume as resume_mod
+    from src.core.checkpoint import Checkpoint
+
+    cfg = MergeConfig(upstream_ref="upstream", fork_ref="fork")
+    state = MergeState(config=cfg)
+    state.status = SystemStatus.AWAITING_HUMAN
+    state.plan_human_review = PlanHumanReview(
+        decision=PlanHumanDecision.APPROVE,
+        reviewer_name="tester",
+    )
+    state.pending_user_decisions = [
+        _make_pending_item("a.py", choice=None),
+        _make_pending_item("b.py", choice=None),
+        _make_pending_item("c.py", choice="downgrade_safe"),  # already decided
+    ]
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    ckpt = Checkpoint(run_dir)
+    saved_path = ckpt.save(state, tag="init")
+
+    decisions_path = tmp_path / "decisions.yaml"
+    decisions_path.write_text(
+        yaml.safe_dump(
+            {
+                "item_decisions": [
+                    {"file_path": "a.py", "user_choice": "take_target"},
+                    {"file_path": "b.py", "user_choice": "take_current"},
+                    # attempt to overwrite c.py must be ignored
+                    {"file_path": "c.py", "user_choice": "approve_human"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = {"state": state}
+
+    class _StubOrch:
+        def __init__(self, cfg):
+            pass
+
+        async def run(self, s):
+            loaded["state"] = s
+            return s
+
+    monkeypatch.setattr(resume_mod, "Orchestrator", _StubOrch)
+
+    resume_mod.resume_command_impl(
+        run_id=None,
+        checkpoint_path=str(saved_path),
+        decisions=str(decisions_path),
+    )
+
+    final = loaded["state"]
+    by_path = {it.file_path: it for it in final.pending_user_decisions}
+    assert by_path["a.py"].user_choice == "take_target"
+    assert by_path["b.py"].user_choice == "take_current"
+    # Already-decided items must NOT be overwritten.
+    assert by_path["c.py"].user_choice == "downgrade_safe"
+    # plan_human_review snapshot kept in sync.
+    assert final.plan_human_review is not None
+    assert any(
+        it.file_path == "a.py" and it.user_choice == "take_target"
+        for it in final.plan_human_review.item_decisions
+    )
+
+
+@pytest.mark.asyncio
+async def test_human_review_stays_awaiting_when_items_undecided_after_approval():
+    """O-L4 safety-net: even with plan_human_review=APPROVE, if
+    pending_user_decisions has undecided items (e.g. O-M1 added them after
+    approval), HumanReviewPhase must stay in AWAITING_HUMAN instead of
+    bouncing to AUTO_MERGING."""
+    state = _make_state_with_approved_plan()
+    state.pending_user_decisions = [
+        _make_pending_item("new_conflict.py", choice=None),
+    ]
+
+    ctx = MagicMock()
+    ctx.config.output.directory = "./outputs"
+    ctx.state_machine.transition = MagicMock()
+
+    import src.core.phases.human_review as hr_mod
+
+    original_writer = hr_mod.write_plan_review_report
+    hr_mod.write_plan_review_report = MagicMock(return_value=None)
+    try:
+        outcome = await HumanReviewPhase().execute(state, ctx)
+    finally:
+        hr_mod.write_plan_review_report = original_writer
+
+    assert outcome.target_status == SystemStatus.AWAITING_HUMAN
+    assert outcome.extra == {"paused": True}
+    # Must NOT have triggered a transition to AUTO_MERGING.
+    for call in ctx.state_machine.transition.call_args_list:
+        assert call.args[1] != SystemStatus.AUTO_MERGING
+
+
 def test_escalate_record_from_conflict_markers_is_well_formed():
     from src.models.decision import DecisionSource
 

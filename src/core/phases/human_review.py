@@ -204,6 +204,31 @@ class HumanReviewPhase(Phase):
                 ),
             )
             if state.plan_human_review.decision == PlanHumanDecision.APPROVE:
+                # O-L4 guard: if AUTO_MERGE appended new undecided items
+                # (conflict_markers_*, binary_asset_*, human_required_*)
+                # after the original plan approval, stay in AWAITING_HUMAN
+                # until the user decides them. Without this, the state
+                # machine ping-pongs AUTO_MERGING ↔ AWAITING_HUMAN every
+                # ~20s because AUTO_MERGE's pre-pass bounces back here and
+                # Case 2 sees plan approved → AUTO_MERGING.
+                undecided_items = [
+                    it for it in state.pending_user_decisions if it.user_choice is None
+                ]
+                if undecided_items:
+                    logger.info(
+                        "O-L4: %d pending_user_decisions item(s) undecided "
+                        "after plan approval — staying in AWAITING_HUMAN",
+                        len(undecided_items),
+                    )
+                    return PhaseOutcome(
+                        target_status=SystemStatus.AWAITING_HUMAN,
+                        reason=(
+                            f"{len(undecided_items)} plan-level items "
+                            "undecided after approval"
+                        ),
+                        checkpoint_tag="awaiting_human_post_approval_items",
+                        extra={"paused": True},
+                    )
                 # O-L3 guard: if AUTO_MERGE previously exhausted its dispute
                 # budget for one or more batches, do NOT bounce back into
                 # AUTO_MERGING. Route to JUDGE_REVIEWING so the final verdict

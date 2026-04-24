@@ -66,6 +66,51 @@ def resume_command_impl(
             sys.exit(1)
 
         plan_approval = _raw.get("plan_approval") if isinstance(_raw, dict) else None
+
+        # O-L4 fix: item_decisions must be injectable regardless of whether
+        # plan_human_review is already set. After plan approval, AUTO_MERGE
+        # may append new undecided items (e.g. O-M1 conflict_markers_*, O-B3
+        # binary_asset_*) that the user needs to decide on a subsequent
+        # resume. Previously this block was gated on
+        # `plan_human_review is None`, causing undecided items to persist and
+        # triggering an AUTO_MERGE ↔ AWAITING_HUMAN ping-pong.
+        raw_items = (
+            _raw.get("item_decisions") if isinstance(_raw, dict) else None
+        ) or []
+        by_path = {
+            it["file_path"]: it
+            for it in raw_items
+            if isinstance(it, dict) and it.get("file_path")
+        }
+        applied = 0
+        for idx, item in enumerate(state.pending_user_decisions):
+            payload = by_path.get(item.file_path)
+            if not payload:
+                continue
+            choice = payload.get("user_choice")
+            if not choice:
+                continue
+            # Never overwrite an already-decided item; user must clear it
+            # via a fresh run if they changed their mind.
+            if item.user_choice is not None:
+                continue
+            valid_keys = {o.key for o in item.options}
+            if choice not in valid_keys:
+                console.print(
+                    f"[red]Invalid user_choice {choice!r} for "
+                    f"{item.file_path} (valid: {sorted(valid_keys)})[/red]"
+                )
+                sys.exit(1)
+            state.pending_user_decisions[idx] = item.model_copy(
+                update={
+                    "user_choice": choice,
+                    "user_input": payload.get("notes"),
+                }
+            )
+            applied += 1
+        if applied:
+            console.print(f"[green]Applied {applied} per-file choices[/green]")
+
         if plan_approval and state.plan_human_review is None:
             try:
                 pd = PlanHumanDecision(str(plan_approval).lower())
@@ -76,44 +121,6 @@ def resume_command_impl(
                 )
                 sys.exit(1)
 
-            # Apply per-item choices (plan-level UserDecisionItem list) if
-            # provided. YAML shape:
-            #   item_decisions:
-            #     - file_path: path/to/file.py
-            #       user_choice: downgrade_risky  # approve_human|downgrade_risky|downgrade_safe
-            raw_items = (
-                _raw.get("item_decisions") if isinstance(_raw, dict) else None
-            ) or []
-            by_path = {
-                it["file_path"]: it
-                for it in raw_items
-                if isinstance(it, dict) and it.get("file_path")
-            }
-            applied = 0
-            for idx, item in enumerate(state.pending_user_decisions):
-                payload = by_path.get(item.file_path)
-                if not payload:
-                    continue
-                choice = payload.get("user_choice")
-                if not choice:
-                    continue
-                valid_keys = {o.key for o in item.options}
-                if choice not in valid_keys:
-                    console.print(
-                        f"[red]Invalid user_choice {choice!r} for "
-                        f"{item.file_path} (valid: {sorted(valid_keys)})[/red]"
-                    )
-                    sys.exit(1)
-                state.pending_user_decisions[idx] = item.model_copy(
-                    update={
-                        "user_choice": choice,
-                        "user_input": payload.get("notes"),
-                    }
-                )
-                applied += 1
-            if applied:
-                console.print(f"[green]Applied {applied} per-file choices[/green]")
-
             state.plan_human_review = PlanHumanReview(
                 decision=pd,
                 reviewer_name=(_raw.get("reviewer") if isinstance(_raw, dict) else None)
@@ -123,6 +130,13 @@ def resume_command_impl(
             )
             console.print(
                 f"[green]Plan approval set to {pd.value!r} via decisions file[/green]"
+            )
+        elif applied and state.plan_human_review is not None:
+            # Keep plan_human_review.item_decisions snapshot in sync with
+            # the updated pending_user_decisions so downstream consumers
+            # see the latest user_choice values.
+            state.plan_human_review = state.plan_human_review.model_copy(
+                update={"item_decisions": list(state.pending_user_decisions)}
             )
 
         judge_resolution = (
