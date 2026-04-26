@@ -414,6 +414,141 @@ class TestHumanReviewPhase:
         assert outcome.target_status == SystemStatus.GENERATING_REPORT
         assert outcome.checkpoint_tag == "judge_accepted"
 
+    @pytest.mark.asyncio
+    async def test_b_d_missing_catchup_after_resume(self, tmp_path):
+        """O-B4-e2e-gap regression: when AUTO_MERGE is skipped on resume
+        (state was already AWAITING_HUMAN with conflict decisions all
+        resolved), B-class and D-missing text files in the merge_plan
+        that have no file_decision_record must be caught up via
+        TAKE_TARGET in the human_review phase. Without this, layer 1+
+        files stay at fork content and Judge fails them as "differs from
+        upstream after merge" / "not present in HEAD after merge".
+        """
+        from src.models.human import HumanDecisionRequest, DecisionOption
+        from src.models.decision import (
+            FileDecisionRecord,
+            MergeDecision as MD,
+            DecisionSource,
+        )
+        from src.models.diff import FileChangeCategory, FileStatus
+
+        b_file = "models/foo/manifest.yaml"
+        d_file = "models/bar/new.yaml"
+        already_decided_file = "tools/baz/conflict.py"
+
+        state = _make_state(status=SystemStatus.AWAITING_HUMAN)
+        state.current_phase = MergePhase.AUTO_MERGE
+        state.merge_base_commit = "deadbeef"
+        state.file_categories = {
+            b_file: FileChangeCategory.B,
+            d_file: FileChangeCategory.D_MISSING,
+            already_decided_file: FileChangeCategory.C,
+        }
+        state.merge_plan = _make_plan(
+            phases=[
+                PhaseFileBatch(
+                    batch_id="b1",
+                    phase=MergePhase.AUTO_MERGE,
+                    file_paths=[b_file, d_file, already_decided_file],
+                    risk_level="auto_safe",
+                )
+            ]
+        )
+        # Already-decided file should NOT be re-applied (skip via
+        # file_decision_records guard).
+        state.file_decision_records[already_decided_file] = FileDecisionRecord(
+            file_path=already_decided_file,
+            file_status=FileStatus.MODIFIED,
+            decision=MD.TAKE_TARGET,
+            decision_source=DecisionSource.AUTO_EXECUTOR,
+            confidence=0.9,
+            rationale="prior decision",
+            phase="auto_merge",
+            agent="executor",
+            timestamp=datetime.now(),
+        )
+        decided_req = HumanDecisionRequest(
+            file_path=already_decided_file,
+            priority=5,
+            conflict_points=[],
+            context_summary="",
+            upstream_change_summary="",
+            fork_change_summary="",
+            analyst_recommendation=MD.TAKE_TARGET,
+            analyst_confidence=0.8,
+            analyst_rationale="",
+            options=[
+                DecisionOption(
+                    option_key="take_target",
+                    decision=MD.TAKE_TARGET,
+                    description="take upstream",
+                )
+            ],
+            created_at=datetime.now(),
+            human_decision=MD.TAKE_TARGET,
+        )
+        state.human_decision_requests = {already_decided_file: decided_req}
+
+        # Mock git_tool to serve upstream content for catch-up files.
+        git_tool = MagicMock()
+        git_tool.repo_path = tmp_path
+        git_tool.get_file_content.side_effect = lambda ref, fp: {
+            b_file: "upstream-B-content\n",
+            d_file: "upstream-D-content\n",
+        }.get(fp)
+        git_tool.get_unmerged_files.return_value = []
+
+        executor = AsyncMock()
+        executor.execute_human_decision = AsyncMock(
+            return_value=FileDecisionRecord(
+                file_path=already_decided_file,
+                file_status=FileStatus.MODIFIED,
+                decision=MD.TAKE_TARGET,
+                decision_source=DecisionSource.AUTO_EXECUTOR,
+                confidence=0.9,
+                rationale="executed",
+                phase="human_review",
+                agent="executor",
+                timestamp=datetime.now(),
+            )
+        )
+
+        ctx = _make_ctx(git_tool=git_tool, agents={"executor": executor})
+        # Disable post-phase commit so we only assert catch-up writes.
+        ctx.config.history.enabled = False
+
+        # Force is_binary_asset to False so all text files go through the
+        # text catch-up path.
+        with patch("src.tools.binary_assets.is_binary_asset", return_value=False):
+            phase = HumanReviewPhase()
+            outcome = await phase.execute(state, ctx)
+
+        # Working tree must contain upstream content for both B and
+        # D-missing files.
+        b_path = tmp_path / b_file
+        d_path = tmp_path / d_file
+        assert b_path.exists(), "B-class file should be written to working tree"
+        assert d_path.exists(), "D-missing file should be written to working tree"
+        assert b_path.read_text() == "upstream-B-content\n"
+        assert d_path.read_text() == "upstream-D-content\n"
+
+        # file_decision_records must include catch-up entries.
+        assert b_file in state.file_decision_records
+        assert d_file in state.file_decision_records
+        assert state.file_decision_records[b_file].agent == "b_d_text_catchup"
+        assert state.file_decision_records[d_file].agent == "b_d_text_catchup"
+        assert state.file_decision_records[b_file].decision == MD.TAKE_TARGET
+        assert state.file_decision_records[d_file].decision == MD.TAKE_TARGET
+
+        # Already-decided file must NOT be touched by catch-up.
+        assert (
+            state.file_decision_records[already_decided_file].agent
+            != "b_d_text_catchup"
+        )
+
+        # Phase advances toward judge review.
+        assert outcome.target_status == SystemStatus.JUDGE_REVIEWING
+
 
 # ---------------------------------------------------------------------------
 # ReportGenerationPhase

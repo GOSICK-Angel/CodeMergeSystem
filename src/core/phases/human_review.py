@@ -199,6 +199,89 @@ class HumanReviewPhase(Phase):
                                 )
                             state.file_decision_records[fp] = record
 
+                    # O-B4-e2e-gap (extension): also catch up B-class and
+                    # D-missing text files that missed AUTO_MERGE on resume.
+                    # Without this, layer 1+ B/D-missing files stay at fork
+                    # content in the working tree, causing Judge to flag them
+                    # as "B-class file differs from upstream after merge" or
+                    # "D-missing file not present in HEAD after merge".
+                    from src.tools.patch_applier import apply_with_snapshot
+                    from src.models.diff import FileChangeCategory
+
+                    text_catchup: list[str] = []
+                    categories = state.file_categories or {}
+                    for batch in state.merge_plan.phases:
+                        for fp in batch.file_paths:
+                            if fp in state.file_decision_records:
+                                continue
+                            if is_binary_asset(fp):
+                                continue
+                            cat = categories.get(fp)
+                            if cat in (
+                                FileChangeCategory.B,
+                                FileChangeCategory.D_MISSING,
+                            ):
+                                text_catchup.append(fp)
+
+                    text_catchup_applied: list[str] = []
+                    if text_catchup:
+                        logger.info(
+                            "O-B4-e2e-gap: catching up %d B/D-missing text "
+                            "file(s) that missed AUTO_MERGE on this resume",
+                            len(text_catchup),
+                        )
+                        from src.models.decision import (
+                            DecisionSource,
+                            FileDecisionRecord,
+                            MergeDecision,
+                        )
+                        from src.models.diff import FileStatus
+
+                        for fp in text_catchup:
+                            try:
+                                content = ctx.git_tool.get_file_content(
+                                    state.config.upstream_ref, fp
+                                )
+                                if content is None:
+                                    raise RuntimeError(
+                                        "upstream text content not found"
+                                    )
+                                record = await apply_with_snapshot(
+                                    fp,
+                                    content,
+                                    ctx.git_tool,
+                                    state,
+                                    phase="human_review",
+                                    agent="b_d_text_catchup",
+                                    decision=MergeDecision.TAKE_TARGET,
+                                    rationale=(
+                                        "O-B4-e2e-gap: B/D-missing text "
+                                        "TAKE_TARGET catch-up after "
+                                        "AUTO_MERGE skip on resume."
+                                    ),
+                                )
+                                if not record.is_rolled_back:
+                                    text_catchup_applied.append(fp)
+                            except Exception as exc:
+                                logger.warning(
+                                    "O-B4-e2e-gap text catch-up failed for %s: %s",
+                                    fp,
+                                    exc,
+                                )
+                                record = FileDecisionRecord(
+                                    file_path=fp,
+                                    file_status=FileStatus.MODIFIED,
+                                    decision=MergeDecision.ESCALATE_HUMAN,
+                                    decision_source=DecisionSource.AUTO_EXECUTOR,
+                                    confidence=0.0,
+                                    rationale=(
+                                        f"O-B4-e2e-gap text catch-up failed ({exc!r})"
+                                    ),
+                                    phase="human_review",
+                                    agent="b_d_text_catchup",
+                                )
+                            state.file_decision_records[fp] = record
+
                 if ctx.config.history.enabled and ctx.config.history.commit_after_phase:
                     human_files = [
                         req.file_path
@@ -208,6 +291,14 @@ class HumanReviewPhase(Phase):
                             req.file_path
                         ].is_rolled_back
                     ]
+                    # O-B4-e2e-gap: include text catch-up files in the
+                    # commit so the working tree is reflected in HEAD.
+                    catchup_extras = [
+                        fp
+                        for fp in locals().get("text_catchup_applied", [])
+                        if fp not in human_files
+                    ]
+                    human_files = human_files + catchup_extras
                     if human_files:
                         committer = GitCommitter()
                         replayer = CommitReplayer()
