@@ -1176,11 +1176,14 @@ class JudgeAgent(BaseAgent):
             file_reviews,
             project_context=state.config.project_context,
         )
+        file_paths = [fp for fp, _, _, _ in chunk]
+        memory_text = self.get_memory_context(self._current_phase, file_paths)
+        if memory_text:
+            prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
         try:
             raw = await self._call_llm_with_retry(
                 [{"role": "user", "content": prompt}], system=JUDGE_SYSTEM
             )
-            file_paths = [fp for fp, _, _, _ in chunk]
             per_file = parse_batch_file_review_issues(str(raw), file_paths)
             for issues_list in per_file.values():
                 all_issues.extend(issues_list)

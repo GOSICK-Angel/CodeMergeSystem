@@ -426,6 +426,7 @@ class ExecutorAgent(BaseAgent):
             len(pairs),
         )
 
+        memory_text = self.get_memory_context(self._current_phase, [file_path])
         merged_chunks: list[str] = []
         for idx, (curr_chunk, tgt_chunk) in enumerate(pairs):
             prompt = _build_chunk_merge_prompt(
@@ -437,6 +438,8 @@ class ExecutorAgent(BaseAgent):
                 state.config.project_context,
                 conflict_analysis.rationale,
             )
+            if memory_text:
+                prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
             try:
                 raw = await self._call_llm_with_retry(
                     [{"role": "user", "content": prompt}],
@@ -622,6 +625,11 @@ class ExecutorAgent(BaseAgent):
                 f"Upstream content:\n```\n{target_content or '(file does not exist)'}\n```\n\n"
                 "Output ONLY the repaired file content, no explanation."
             )
+            memory_text = self.get_memory_context(
+                self._current_phase, [instr.file_path]
+            )
+            if memory_text:
+                prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
             messages = [{"role": "user", "content": prompt}]
 
             try:
@@ -683,6 +691,9 @@ class ExecutorAgent(BaseAgent):
             file_diff.lines_deleted,
             state.config.project_context,
         )
+        memory_text = self.get_memory_context(self._current_phase, [file_path])
+        if memory_text:
+            prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
         rationale = "File deleted in upstream branch."
         try:
             raw = await self._call_llm_with_retry(
@@ -727,6 +738,9 @@ class ExecutorAgent(BaseAgent):
         prompt = build_rebuttal_prompt(
             issues_summary, file_paths, state.config.project_context
         )
+        memory_text = self.get_memory_context(self._current_phase, file_paths)
+        if memory_text:
+            prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
         try:
             raw = await self._call_llm_with_retry(
                 [{"role": "user", "content": prompt}], system=EXECUTOR_SYSTEM

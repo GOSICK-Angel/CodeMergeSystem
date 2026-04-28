@@ -231,6 +231,9 @@ class ConflictAnalystAgent(BaseAgent):
             round_commits, file_three_way, file_languages, project_context
         )
         file_paths = list(file_three_way.keys())
+        memory_text = self.get_memory_context(self._current_phase, file_paths)
+        if memory_text:
+            prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
         try:
             raw = await self._call_llm_with_retry(
                 [{"role": "user", "content": prompt}], system=ANALYST_SYSTEM
