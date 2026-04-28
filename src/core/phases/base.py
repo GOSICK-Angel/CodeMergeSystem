@@ -15,6 +15,7 @@ from src.core.phase_runner import PhaseRunner
 from src.tools.git_tool import GitTool
 from src.tools.gate_runner import GateRunner
 from src.tools.trace_logger import TraceLogger
+from src.memory.hit_tracker import MemoryHitTracker
 from src.memory.store import MemoryStore
 from src.memory.summarizer import PhaseSummarizer
 from src.core.hooks import HookManager
@@ -56,6 +57,7 @@ class PhaseContext:
     phase_runner: PhaseRunner
     memory_store: MemoryStore
     summarizer: PhaseSummarizer
+    memory_hit_tracker: MemoryHitTracker | None = None
     trace_logger: TraceLogger | None = None
     emit: OnActivityCallback | None = None
     hooks: HookManager = field(default_factory=HookManager)

@@ -39,6 +39,9 @@ class ReportGenerationPhase(Phase):
             utilization_summary = (
                 ctx.trace_logger.get_utilization_summary() if ctx.trace_logger else None
             )
+            memory_summary = (
+                ctx.memory_hit_tracker.summary() if ctx.memory_hit_tracker else None
+            )
 
             if "json" in state.config.output.formats:
                 write_json_report(state, output_dir)
@@ -48,6 +51,7 @@ class ReportGenerationPhase(Phase):
                     output_dir,
                     cost_summary=cost_summary,
                     utilization_summary=utilization_summary,
+                    memory_summary=memory_summary,
                 )
 
             write_living_plan_report(state, output_dir)

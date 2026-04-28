@@ -101,6 +101,16 @@ _I18N: dict[str, dict[str, str]] = {
         "context_utilization": "Context Utilization",
         "avg_ctx_utilization": "Avg utilization",
         "peak_ctx_utilization": "Peak utilization",
+        "memory_utilization": "Memory Utilization",
+        "memory_total_calls": "Total memory loads",
+        "memory_hit_calls": "Hit loads (>=1 entry returned)",
+        "memory_hit_rate": "Hit rate",
+        "memory_entries_l0": "L0 profile entries",
+        "memory_entries_l1_patterns": "L1 current-phase patterns",
+        "memory_entries_l1_decisions": "L1 prior-phase decisions",
+        "memory_entries_l2": "L2 file-relevant entries",
+        "memory_by_phase": "By phase",
+        "phase_label": "Phase",
         "planner_response_hdr": "Planner Responses",
         "response_accept": "Accept",
         "response_reject": "Reject",
@@ -203,6 +213,16 @@ _I18N: dict[str, dict[str, str]] = {
         "context_utilization": "Context 利用率",
         "avg_ctx_utilization": "平均利用率",
         "peak_ctx_utilization": "峰值利用率",
+        "memory_utilization": "Memory 利用率",
+        "memory_total_calls": "Memory 加载次数",
+        "memory_hit_calls": "命中次数 (含至少 1 条记录)",
+        "memory_hit_rate": "命中率",
+        "memory_entries_l0": "L0 项目档案条目",
+        "memory_entries_l1_patterns": "L1 当前阶段 patterns",
+        "memory_entries_l1_decisions": "L1 上阶段 decisions",
+        "memory_entries_l2": "L2 文件相关 entries",
+        "memory_by_phase": "按阶段统计",
+        "phase_label": "阶段",
         "planner_response_hdr": "Planner 逐条回应",
         "response_accept": "接受",
         "response_reject": "拒绝",
@@ -222,6 +242,7 @@ def _build_run_insights_lines(
     t: partial[str],
     cost_summary: dict[str, Any],
     utilization_summary: dict[str, Any] | None = None,
+    memory_summary: dict[str, Any] | None = None,
 ) -> list[str]:
     """Build the Run Insights markdown section from CostTracker and TraceLogger summaries."""
     if not cost_summary or cost_summary.get("total_calls", 0) == 0:
@@ -278,6 +299,42 @@ def _build_run_insights_lines(
             lines.append(f"| {agent_name} | {avg:.1%} | {peak:.1%} |")
         lines.append("")
 
+    if memory_summary and int(memory_summary.get("total_calls", 0)) > 0:
+        total_calls = int(memory_summary.get("total_calls", 0))
+        hit_calls = int(memory_summary.get("hit_calls", 0))
+        hit_rate = float(memory_summary.get("hit_rate", 0.0))
+        by_layer = memory_summary.get("by_layer", {}) or {}
+        by_phase = memory_summary.get("by_phase", {}) or {}
+
+        lines += [
+            f"### {t('memory_utilization')}",
+            "",
+            f"| {t('metric')} | {t('value')} |",
+            "|--------|-------|",
+            f"| {t('memory_total_calls')} | {total_calls} |",
+            f"| {t('memory_hit_calls')} | {hit_calls} |",
+            f"| {t('memory_hit_rate')} | {hit_rate:.1%} |",
+            f"| {t('memory_entries_l0')} | {int(by_layer.get('l0', 0))} |",
+            f"| {t('memory_entries_l1_patterns')} | {int(by_layer.get('l1_patterns', 0))} |",
+            f"| {t('memory_entries_l1_decisions')} | {int(by_layer.get('l1_decisions', 0))} |",
+            f"| {t('memory_entries_l2')} | {int(by_layer.get('l2', 0))} |",
+            "",
+        ]
+
+        if by_phase:
+            lines += [
+                f"#### {t('memory_by_phase')}",
+                "",
+                f"| {t('phase_label')} | {t('calls')} | {t('memory_hit_calls')} | {t('memory_hit_rate')} |",
+                "|-------|-------|--------|------|",
+            ]
+            for phase_name, phase_stats in sorted(by_phase.items()):
+                p_calls = int(phase_stats.get("calls", 0))
+                p_hits = int(phase_stats.get("hit_calls", 0))
+                p_rate = float(phase_stats.get("hit_rate", 0.0))
+                lines.append(f"| {phase_name} | {p_calls} | {p_hits} | {p_rate:.1%} |")
+            lines.append("")
+
     return lines
 
 
@@ -286,6 +343,7 @@ def write_markdown_report(
     output_dir: str,
     cost_summary: dict[str, Any] | None = None,
     utilization_summary: dict[str, Any] | None = None,
+    memory_summary: dict[str, Any] | None = None,
 ) -> Path:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -395,7 +453,11 @@ def write_markdown_report(
         lines.append("")
 
     if cost_summary:
-        lines.extend(_build_run_insights_lines(t, cost_summary, utilization_summary))
+        lines.extend(
+            _build_run_insights_lines(
+                t, cost_summary, utilization_summary, memory_summary
+            )
+        )
 
     report_path.write_text("\n".join(lines), encoding="utf-8")
     return report_path

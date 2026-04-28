@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from src.memory.hit_tracker import MemoryHitTracker
 from src.memory.store import MemoryStore
 
 L1_MAX_PATTERNS = 5
@@ -12,8 +13,13 @@ _PHASE_ORDER = ["planning", "auto_merge", "conflict_analysis", "judge_review"]
 
 
 class LayeredMemoryLoader:
-    def __init__(self, store: MemoryStore) -> None:
+    def __init__(
+        self,
+        store: MemoryStore,
+        tracker: MemoryHitTracker | None = None,
+    ) -> None:
         self._store = store
+        self._tracker = tracker
 
     def load_for_agent(
         self,
@@ -21,36 +27,52 @@ class LayeredMemoryLoader:
         file_paths: list[str] | None = None,
     ) -> str:
         sections: list[str] = []
+        layer_counts: dict[str, int] = {
+            "l0": 0,
+            "l1_patterns": 0,
+            "l1_decisions": 0,
+            "l2": 0,
+        }
 
-        l0 = self._build_l0()
-        if l0:
-            sections.append(l0)
+        l0_text, l0_count = self._build_l0()
+        if l0_text:
+            sections.append(l0_text)
+            layer_counts["l0"] = l0_count
 
-        l1 = self._build_l1(current_phase)
-        if l1:
-            sections.append(l1)
+        l1_text, l1_patterns, l1_decisions = self._build_l1(current_phase)
+        if l1_text:
+            sections.append(l1_text)
+            layer_counts["l1_patterns"] = l1_patterns
+            layer_counts["l1_decisions"] = l1_decisions
 
         if file_paths:
-            l2 = self._build_l2(file_paths)
-            if l2:
-                sections.append(l2)
+            l2_text, l2_count = self._build_l2(file_paths)
+            if l2_text:
+                sections.append(l2_text)
+                layer_counts["l2"] = l2_count
+
+        if self._tracker is not None:
+            self._tracker.record_call(current_phase, layer_counts)  # type: ignore[arg-type]
 
         return "\n\n".join(sections) if sections else ""
 
-    def _build_l0(self) -> str:
+    def _build_l0(self) -> tuple[str, int]:
         profile = self._store.codebase_profile
         if not profile:
-            return ""
+            return "", 0
         lines = [f"- {k}: {v}" for k, v in profile.items()]
-        return "## Project Profile\n" + "\n".join(lines)
+        return "## Project Profile\n" + "\n".join(lines), len(profile)
 
-    def _build_l1(self, current_phase: str) -> str:
+    def _build_l1(self, current_phase: str) -> tuple[str, int, int]:
         parts: list[str] = []
+        patterns_count = 0
+        decisions_count = 0
 
         current_summary = self._store.get_phase_summary(current_phase)
         if current_summary and current_summary.patterns_discovered:
             patterns = current_summary.patterns_discovered[:L1_MAX_PATTERNS]
             parts.append("Key patterns: " + "; ".join(patterns))
+            patterns_count = len(patterns)
 
         prev_phase = _previous_phase(current_phase)
         if prev_phase:
@@ -58,17 +80,18 @@ class LayeredMemoryLoader:
             if prev_summary and prev_summary.key_decisions:
                 decisions = prev_summary.key_decisions[:L1_MAX_DECISIONS]
                 parts.append("Prior phase decisions: " + "; ".join(decisions))
+                decisions_count = len(decisions)
 
         if not parts:
-            return ""
-        return "## Phase Context\n" + "\n".join(parts)
+            return "", 0, 0
+        return "## Phase Context\n" + "\n".join(parts), patterns_count, decisions_count
 
-    def _build_l2(self, file_paths: list[str]) -> str:
+    def _build_l2(self, file_paths: list[str]) -> tuple[str, int]:
         relevant = self._store.get_relevant_context(
             file_paths, max_entries=L2_MAX_ENTRIES
         )
         if not relevant:
-            return ""
+            return "", 0
 
         lines: list[str] = []
         for entry in relevant:
@@ -78,8 +101,8 @@ class LayeredMemoryLoader:
             lines.append(f"- [{label}] {entry.content}")
 
         if not lines:
-            return ""
-        return "## Relevant Patterns\n" + "\n".join(lines)
+            return "", 0
+        return "## Relevant Patterns\n" + "\n".join(lines), len(lines)
 
 
 def _previous_phase(phase: str) -> str | None:

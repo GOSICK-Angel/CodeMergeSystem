@@ -48,6 +48,7 @@ from src.core.phases import (
 from src.core.phases.base import ActivityEvent, OnActivityCallback
 from src.core.coordinator import Coordinator
 from src.core.state_machine import StateMachine
+from src.memory.hit_tracker import MemoryHitTracker
 from src.memory.sqlite_store import SQLiteMemoryStore
 from src.memory.store import MemoryStore
 from src.memory.summarizer import PhaseSummarizer
@@ -152,6 +153,7 @@ class Orchestrator:
 
         # --- memory ---
         self._memory_store: MemoryStore | SQLiteMemoryStore = MemoryStore()
+        self._memory_hit_tracker = MemoryHitTracker()
         self._summarizer = PhaseSummarizer()
 
         # --- hooks (C1) ---
@@ -202,6 +204,7 @@ class Orchestrator:
         db_path = run_dir / "memory.db"
         self._memory_store = SQLiteMemoryStore.open(db_path)
         state.memory_db_path = str(db_path)
+        self._memory_hit_tracker.set_persist_path(run_dir / "memory_hit_stats.json")
         self._inject_memory()
         self._inject_hooks()
 
@@ -310,6 +313,7 @@ class Orchestrator:
             phase_runner=self.phase_runner,
             memory_store=self._memory_store,  # type: ignore[arg-type]
             summarizer=self._summarizer,
+            memory_hit_tracker=self._memory_hit_tracker,
             trace_logger=self._trace_logger,
             emit=self._on_activity,
             hooks=self._hooks,
@@ -403,6 +407,7 @@ class Orchestrator:
     def _inject_memory(self) -> None:
         for agent in self._all_agents:
             agent.set_memory_store(self._memory_store)  # type: ignore[arg-type]
+            agent.set_memory_hit_tracker(self._memory_hit_tracker)
 
     def _inject_cost_tracker(self, phase: str = "") -> None:
         for agent in self._all_agents:

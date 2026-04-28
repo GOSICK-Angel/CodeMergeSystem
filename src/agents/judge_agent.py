@@ -206,8 +206,12 @@ class JudgeAgent(BaseAgent):
         memory_context = ""
         max_content_chars: int | None = None
         if self._memory_store:
-            builder = AgentPromptBuilder(self.llm_config, self._memory_store)
-            memory_context = builder.build_memory_context_text([file_path])
+            builder = AgentPromptBuilder(
+                self.llm_config, self._memory_store, self._memory_hit_tracker
+            )
+            memory_context = builder.build_memory_context_text(
+                [file_path], current_phase=self._current_phase
+            )
             max_content_chars = builder.compute_content_budget(
                 JUDGE_SYSTEM + memory_context
             )

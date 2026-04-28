@@ -10,6 +10,7 @@ from src.llm.context import (
     estimate_tokens,
     get_context_window,
 )
+from src.memory.hit_tracker import MemoryHitTracker
 from src.memory.layered_loader import LayeredMemoryLoader
 from src.memory.store import MemoryStore
 from src.models.config import AgentLLMConfig
@@ -29,9 +30,11 @@ class AgentPromptBuilder:
         self,
         llm_config: AgentLLMConfig,
         memory_store: MemoryStore | None = None,
+        memory_hit_tracker: MemoryHitTracker | None = None,
     ) -> None:
         self.llm_config = llm_config
         self.memory_store = memory_store
+        self.memory_hit_tracker = memory_hit_tracker
         self.budget = TokenBudget(
             model=llm_config.model,
             context_window=get_context_window(llm_config.model),
@@ -83,7 +86,7 @@ class AgentPromptBuilder:
         current_phase: str | None = None,
     ) -> str:
         if current_phase is not None and self.memory_store is not None:
-            loader = LayeredMemoryLoader(self.memory_store)
+            loader = LayeredMemoryLoader(self.memory_store, self.memory_hit_tracker)
             return loader.load_for_agent(current_phase, file_paths)
 
         section = self._build_memory_section(file_paths)

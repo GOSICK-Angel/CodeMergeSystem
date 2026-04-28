@@ -20,6 +20,7 @@ from src.llm.error_classifier import ClassifiedError, ErrorCategory, classify_er
 from src.llm.credential_pool import CredentialPool
 from src.llm.model_router import select_model
 from src.llm.retry_utils import jittered_backoff
+from src.memory.hit_tracker import MemoryHitTracker
 from src.memory.layered_loader import LayeredMemoryLoader
 from src.memory.store import MemoryStore
 from src.tools.cost_tracker import CostTracker, TokenUsage
@@ -116,6 +117,7 @@ class BaseAgent(ABC):
         self.logger = logging.getLogger(f"agent.{self.agent_type.value}")
         self._trace_logger: TraceLogger | None = None
         self._memory_store: MemoryStore | None = None
+        self._memory_hit_tracker: MemoryHitTracker | None = None
         self._consecutive_failures: int = 0
         self._sliding_window: deque[bool] = deque(maxlen=_SLIDING_WINDOW_SIZE)
         self._credential_pool: CredentialPool | None = self._init_credential_pool()
@@ -193,6 +195,9 @@ class BaseAgent(ABC):
     def set_memory_store(self, store: MemoryStore) -> None:
         self._memory_store = store
 
+    def set_memory_hit_tracker(self, tracker: MemoryHitTracker | None) -> None:
+        self._memory_hit_tracker = tracker
+
     def set_cost_tracker(self, tracker: CostTracker, phase: str = "") -> None:
         self._cost_tracker = tracker
         self._current_phase = phase
@@ -233,7 +238,7 @@ class BaseAgent(ABC):
     ) -> str:
         if self._memory_store is None:
             return ""
-        loader = LayeredMemoryLoader(self._memory_store)
+        loader = LayeredMemoryLoader(self._memory_store, self._memory_hit_tracker)
         return loader.load_for_agent(current_phase, file_paths)
 
     def _get_token_budget(self) -> TokenBudget:

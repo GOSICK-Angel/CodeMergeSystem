@@ -111,8 +111,12 @@ class ConflictAnalystAgent(BaseAgent):
         if self._memory_store:
             from src.llm.prompt_builders import AgentPromptBuilder
 
-            builder = AgentPromptBuilder(self.llm_config, self._memory_store)
-            memory_text = builder.build_memory_context_text([file_diff.file_path])
+            builder = AgentPromptBuilder(
+                self.llm_config, self._memory_store, self._memory_hit_tracker
+            )
+            memory_text = builder.build_memory_context_text(
+                [file_diff.file_path], current_phase=self._current_phase
+            )
             if memory_text:
                 enriched_context = (
                     f"{project_context}\n\n{memory_text}"
