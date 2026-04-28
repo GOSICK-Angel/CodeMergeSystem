@@ -70,6 +70,19 @@ class _ModelOverrideContext:
 
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
+_OPENAI_REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
+
+def _is_openai_reasoning_model(model: str) -> bool:
+    """Detect OpenAI reasoning models (gpt-5*, o1*, o3*, o4*).
+
+    Reasoning models share `max_completion_tokens` between hidden reasoning
+    and visible content; using the legacy `max_tokens` parameter caps total
+    output and frequently leaves zero room for visible content, returning
+    `finish_reason='stop'` with empty `message.content`.
+    """
+    return model.lower().startswith(_OPENAI_REASONING_MODEL_PREFIXES)
+
 
 def _sanitize_surrogates(value: Any) -> Any:
     """Replace lone UTF-16 surrogate code points that break utf-8 encoding.
@@ -236,13 +249,22 @@ class OpenAIClient(LLMClient):
         for msg in sanitized_messages:
             all_messages.append({"role": msg["role"], "content": msg["content"]})
 
-        response = await self._client.chat.completions.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-            messages=all_messages,
-            **kwargs,
-        )
+        if _is_openai_reasoning_model(self.model):
+            response = await self._client.chat.completions.create(
+                model=self.model,
+                max_completion_tokens=self.max_tokens,
+                reasoning_effort="low",
+                messages=all_messages,
+                **kwargs,
+            )
+        else:
+            response = await self._client.chat.completions.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                messages=all_messages,
+                **kwargs,
+            )
         content: str | None = response.choices[0].message.content
         if not content:
             finish_reason = response.choices[0].finish_reason
