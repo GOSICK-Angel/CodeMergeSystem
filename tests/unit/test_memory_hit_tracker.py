@@ -107,7 +107,7 @@ def test_persist_writes_sidecar(tmp_path):
     )
     assert sidecar.exists()
     payload = json.loads(sidecar.read_text())
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["calls_by_phase"] == {"planning": 1}
     assert payload["hit_calls_by_phase"] == {"planning": 1}
     assert payload["entries_by_phase_layer"]["planning"] == {
@@ -115,6 +115,7 @@ def test_persist_writes_sidecar(tmp_path):
         "l1_patterns": 2,
         "l2": 3,
     }
+    assert payload["entry_outcomes"] == {}
 
 
 def test_load_resumes_from_sidecar(tmp_path):
@@ -122,13 +123,14 @@ def test_load_resumes_from_sidecar(tmp_path):
     sidecar.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "calls_by_phase": {"planning": 5, "auto_merge": 3},
                 "hit_calls_by_phase": {"planning": 4, "auto_merge": 2},
                 "entries_by_phase_layer": {
                     "planning": {"l0": 10, "l1_patterns": 8},
                     "auto_merge": {"l2": 5},
                 },
+                "entry_outcomes": {},
             }
         )
     )
@@ -147,10 +149,11 @@ def test_set_persist_path_after_init_loads_existing(tmp_path):
     sidecar.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "calls_by_phase": {"planning": 2},
                 "hit_calls_by_phase": {"planning": 1},
                 "entries_by_phase_layer": {"planning": {"l0": 1}},
+                "entry_outcomes": {},
             }
         )
     )
@@ -268,3 +271,74 @@ def test_prompt_builder_without_tracker_works(tmp_path):
         ["models/tongyi/llm.py"], current_phase="auto_merge"
     )
     assert "Project Profile" in text
+
+
+# --- O-M4: per-entry outcome tracking -------------------------------------
+
+
+def test_record_injection_then_outcome_credits_pass():
+    tracker = MemoryHitTracker()
+    tracker.record_injection(["a.py", "b.py"], ["entry-1", "entry-2"])
+    tracker.record_outcome("a.py", success=True)
+
+    assert tracker.entry_outcome("entry-1") == {"pass": 1, "fail": 0}
+    assert tracker.entry_outcome("entry-2") == {"pass": 1, "fail": 0}
+    assert tracker.entry_outcome("never-injected") == {"pass": 0, "fail": 0}
+
+
+def test_record_outcome_credits_fail():
+    tracker = MemoryHitTracker()
+    tracker.record_injection(["a.py"], ["entry-1"])
+    tracker.record_outcome("a.py", success=False)
+    assert tracker.entry_outcome("entry-1") == {"pass": 0, "fail": 1}
+
+
+def test_record_outcome_with_no_injection_is_noop():
+    tracker = MemoryHitTracker()
+    tracker.record_outcome("a.py", success=True)  # never injected for a.py
+    assert tracker.entry_outcome("entry-1") == {"pass": 0, "fail": 0}
+
+
+def test_outcome_persists_to_sidecar(tmp_path):
+    sidecar = tmp_path / "memory_hit_stats.json"
+    tracker = MemoryHitTracker(persist_path=sidecar)
+    tracker.record_injection(["a.py"], ["entry-1"])
+    tracker.record_outcome("a.py", success=True)
+
+    payload = json.loads(sidecar.read_text())
+    assert payload["entry_outcomes"] == {"entry-1": {"pass": 1, "fail": 0}}
+
+
+def test_outcome_loads_from_sidecar(tmp_path):
+    sidecar = tmp_path / "memory_hit_stats.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "calls_by_phase": {},
+                "hit_calls_by_phase": {},
+                "entries_by_phase_layer": {},
+                "entry_outcomes": {"entry-1": {"pass": 3, "fail": 1}},
+            }
+        )
+    )
+    tracker = MemoryHitTracker(persist_path=sidecar)
+    assert tracker.entry_outcome("entry-1") == {"pass": 3, "fail": 1}
+
+
+def test_summary_outcomes_ranks_helpful_and_harmful():
+    tracker = MemoryHitTracker()
+    tracker.record_injection(["a.py"], ["good"])
+    tracker.record_injection(["b.py"], ["bad"])
+    tracker.record_outcome("a.py", success=True)
+    tracker.record_outcome("a.py", success=True)
+    tracker.record_outcome("b.py", success=False)
+
+    outcomes = tracker.summary()["outcomes"]
+    assert outcomes["tracked_entries"] == 2
+    helpful = outcomes["top_helpful"]
+    harmful = outcomes["top_harmful"]
+    assert helpful and helpful[0]["entry_id"] == "good"
+    assert helpful[0]["score"] == 1.0
+    assert harmful and harmful[0]["entry_id"] == "bad"
+    assert harmful[0]["score"] == -1.0

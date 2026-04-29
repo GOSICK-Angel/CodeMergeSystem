@@ -405,9 +405,11 @@ class Orchestrator:
         return False
 
     def _inject_memory(self) -> None:
+        memory_cfg = getattr(self.config, "memory", None)
         for agent in self._all_agents:
             agent.set_memory_store(self._memory_store)  # type: ignore[arg-type]
             agent.set_memory_hit_tracker(self._memory_hit_tracker)
+            agent.set_memory_config(memory_cfg)
 
     def _inject_cost_tracker(self, phase: str = "") -> None:
         for agent in self._all_agents:

@@ -118,6 +118,7 @@ class BaseAgent(ABC):
         self._trace_logger: TraceLogger | None = None
         self._memory_store: MemoryStore | None = None
         self._memory_hit_tracker: MemoryHitTracker | None = None
+        self._memory_config: object | None = None
         self._consecutive_failures: int = 0
         self._sliding_window: deque[bool] = deque(maxlen=_SLIDING_WINDOW_SIZE)
         self._credential_pool: CredentialPool | None = self._init_credential_pool()
@@ -198,6 +199,13 @@ class BaseAgent(ABC):
     def set_memory_hit_tracker(self, tracker: MemoryHitTracker | None) -> None:
         self._memory_hit_tracker = tracker
 
+    def set_memory_config(self, cfg: object | None) -> None:
+        """Receive ``MemoryExtractionConfig`` so the layered loader can read
+        relevance-filter knobs (O-M3). ``object | None`` typing avoids a
+        circular import with ``src.models.config``.
+        """
+        self._memory_config = cfg
+
     def set_cost_tracker(self, tracker: CostTracker, phase: str = "") -> None:
         self._cost_tracker = tracker
         self._current_phase = phase
@@ -238,7 +246,19 @@ class BaseAgent(ABC):
     ) -> str:
         if self._memory_store is None:
             return ""
-        loader = LayeredMemoryLoader(self._memory_store, self._memory_hit_tracker)
+        memory_cfg = getattr(self, "_memory_config", None)
+        loader = LayeredMemoryLoader(
+            self._memory_store,
+            self._memory_hit_tracker,
+            min_relevance=(
+                memory_cfg.relevance_min_score if memory_cfg is not None else 0.0
+            ),
+            relevance_filter_threshold=(
+                memory_cfg.relevance_filter_threshold
+                if memory_cfg is not None
+                else 100
+            ),
+        )
         text = loader.load_for_agent(current_phase, file_paths)
         if text:
             section_count = text.count("## ")

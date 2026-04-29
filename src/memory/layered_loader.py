@@ -9,6 +9,14 @@ L1_MAX_PATTERNS = 5
 L1_MAX_DECISIONS = 5
 L2_MAX_ENTRIES = 8
 
+# O-M3: when the store grows beyond these thresholds, the loader tightens
+# the L2 cap so prompts stay under the context window. Checked from
+# largest threshold downwards; first match wins.
+_L2_DYNAMIC_CAPS: tuple[tuple[int, int], ...] = (
+    (200, 4),
+    (100, 6),
+)
+
 _PHASE_ORDER = ["planning", "auto_merge", "conflict_analysis", "judge_review"]
 
 
@@ -17,9 +25,13 @@ class LayeredMemoryLoader:
         self,
         store: MemoryStore,
         tracker: MemoryHitTracker | None = None,
+        min_relevance: float = 0.0,
+        relevance_filter_threshold: int = 100,
     ) -> None:
         self._store = store
         self._tracker = tracker
+        self._min_relevance = min_relevance
+        self._relevance_filter_threshold = relevance_filter_threshold
 
     def load_for_agent(
         self,
@@ -87,22 +99,40 @@ class LayeredMemoryLoader:
         return "## Phase Context\n" + "\n".join(parts), patterns_count, decisions_count
 
     def _build_l2(self, file_paths: list[str]) -> tuple[str, int]:
+        cap = self._dynamic_l2_cap()
+        min_rel = self._effective_min_relevance()
         relevant = self._store.get_relevant_context(
-            file_paths, max_entries=L2_MAX_ENTRIES
+            file_paths, max_entries=cap, min_relevance=min_rel
         )
         if not relevant:
             return "", 0
 
         lines: list[str] = []
+        injected_ids: list[str] = []
         for entry in relevant:
             if not _has_path_overlap(entry.file_paths, file_paths):
                 continue
             label = entry.confidence_level.value.upper()
             lines.append(f"- [{label}] {entry.content}")
+            injected_ids.append(entry.entry_id)
 
         if not lines:
             return "", 0
+        if self._tracker is not None and injected_ids:
+            self._tracker.record_injection(file_paths, injected_ids)
         return "## Relevant Patterns\n" + "\n".join(lines), len(lines)
+
+    def _dynamic_l2_cap(self) -> int:
+        count = self._store.entry_count
+        for threshold, cap in _L2_DYNAMIC_CAPS:
+            if count > threshold:
+                return cap
+        return L2_MAX_ENTRIES
+
+    def _effective_min_relevance(self) -> float:
+        if self._store.entry_count > self._relevance_filter_threshold:
+            return self._min_relevance
+        return 0.0
 
 
 def _previous_phase(phase: str) -> str | None:

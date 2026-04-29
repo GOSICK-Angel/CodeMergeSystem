@@ -449,6 +449,21 @@ class MemoryExtractionConfig(BaseModel):
         description="O-M2: trigger extraction when Coordinator produces a "
         "meta_review directive (captures failure-mode insights after stalls).",
     )
+    relevance_min_score: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="O-M3: minimum relevance score (0..1) for an entry to be "
+        "injected when the layered loader applies relevance filtering. "
+        "Score combines path overlap and entry confidence.",
+    )
+    relevance_filter_threshold: int = Field(
+        default=100,
+        ge=10,
+        description="O-M3: when total entries in MemoryStore exceeds this, "
+        "the layered loader tightens caps (L0/L1/L2) and applies "
+        "relevance_min_score so prompts don't bloat past the context window.",
+    )
 
 
 class CoordinatorConfig(BaseModel):

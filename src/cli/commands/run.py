@@ -64,10 +64,90 @@ def _handle_ci_exit(final_state: MergeState) -> None:
         sys.exit(EXIT_UNKNOWN_ERROR)
 
 
+def _run_with_auto_decisions(
+    orchestrator: Orchestrator,
+    state: MergeState,
+    yaml_path: str,
+    ci: bool,
+) -> MergeState:
+    """Drive the orchestrator end-to-end without operator intervention.
+
+    Each AWAITING_HUMAN cycle pops one matching round from the bundle and
+    feeds it back via the same code path ``resume`` uses, then re-enters
+    ``orchestrator.run(state)`` until the run reaches a terminal status or
+    no further matching rounds are available.
+
+    Cap on iterations: 8. The 36-commit run never exceeded 4 awaiting_human
+    cycles; 8 leaves headroom while still preventing an infinite loop on a
+    misconfigured bundle.
+    """
+    from src.cli.decisions_loader import (
+        apply_round,
+        detect_current_phase,
+        load_bundle,
+    )
+
+    try:
+        bundle = load_bundle(yaml_path)
+    except Exception as exc:
+        console.print(f"[red]Failed to read --auto-decisions file: {exc}[/red]")
+        sys.exit(EXIT_UNKNOWN_ERROR)
+
+    if not bundle.rounds:
+        console.print(
+            "[yellow]--auto-decisions file has no rounds; running without "
+            "automation[/yellow]"
+        )
+        return asyncio.run(orchestrator.run(state))
+
+    max_iterations = 8
+    final_state = state
+    for iteration in range(max_iterations):
+        final_state = asyncio.run(orchestrator.run(final_state))
+        if final_state.status != SystemStatus.AWAITING_HUMAN:
+            return final_state
+        phase = detect_current_phase(final_state)
+        if phase is None:
+            console.print(
+                "[yellow]--auto-decisions: cannot determine current decision "
+                "phase, exiting loop[/yellow]"
+            )
+            return final_state
+        rnd = bundle.take_round(phase)
+        if rnd is None:
+            console.print(
+                f"[yellow]--auto-decisions: no round for phase={phase.value}; "
+                f"remaining rounds in bundle: "
+                f"{[r.phase.value for r in bundle.rounds]}[/yellow]"
+            )
+            return final_state
+        try:
+            stats = apply_round(final_state, rnd)
+        except ValueError as exc:
+            console.print(f"[red]--auto-decisions failed at iteration "
+                          f"{iteration + 1}: {exc}[/red]")
+            sys.exit(EXIT_UNKNOWN_ERROR)
+        if not ci:
+            console.print(
+                f"[cyan]--auto-decisions iteration {iteration + 1}: "
+                f"applied phase={phase.value} "
+                f"(items={stats['item_choices']}, "
+                f"conflicts={stats['conflict_decisions']}, "
+                f"plan_approval={stats['plan_approval_set']}, "
+                f"judge_resolution={stats['judge_resolution_set']})[/cyan]"
+            )
+    console.print(
+        f"[yellow]--auto-decisions exhausted {max_iterations} iterations; "
+        f"final status={final_state.status.value}[/yellow]"
+    )
+    return final_state
+
+
 def run_command_impl(
     config: MergeConfig,
     dry_run: bool,
     ci: bool = False,
+    auto_decisions: str | None = None,
 ) -> None:
     if dry_run and not ci:
         console.print("[yellow]Dry run mode: will analyze but not merge[/yellow]")
@@ -92,10 +172,12 @@ def run_command_impl(
 
         orchestrator.set_activity_callback(_print_activity)
 
-    async def execute() -> MergeState:
-        return await orchestrator.run(state)
-
-    final_state = asyncio.run(execute())
+    if auto_decisions:
+        final_state = _run_with_auto_decisions(
+            orchestrator, state, auto_decisions, ci=ci
+        )
+    else:
+        final_state = asyncio.run(orchestrator.run(state))
 
     output_dir = config.output.directory
     debug_dir = config.output.debug_directory

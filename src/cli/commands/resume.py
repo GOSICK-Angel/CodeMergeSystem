@@ -54,131 +54,56 @@ def resume_command_impl(
         return
 
     if decisions and state.status == SystemStatus.AWAITING_HUMAN:
-        import yaml as _yaml
-        from pathlib import Path as _Path
-        from src.agents.human_interface_agent import HumanInterfaceAgent
-        from src.models.plan_review import PlanHumanDecision, PlanHumanReview
+        from src.cli.decisions_loader import (
+            apply_round,
+            detect_current_phase,
+            load_bundle,
+        )
 
         try:
-            _raw = _yaml.safe_load(_Path(decisions).read_text(encoding="utf-8"))
+            bundle = load_bundle(decisions)
         except Exception as _e:
             console.print(f"[red]Failed to read decisions file: {_e}[/red]")
             sys.exit(1)
 
-        plan_approval = _raw.get("plan_approval") if isinstance(_raw, dict) else None
-
-        # O-L4 fix: item_decisions must be injectable regardless of whether
-        # plan_human_review is already set. After plan approval, AUTO_MERGE
-        # may append new undecided items (e.g. O-M1 conflict_markers_*, O-B3
-        # binary_asset_*) that the user needs to decide on a subsequent
-        # resume. Previously this block was gated on
-        # `plan_human_review is None`, causing undecided items to persist and
-        # triggering an AUTO_MERGE ↔ AWAITING_HUMAN ping-pong.
-        raw_items = (
-            _raw.get("item_decisions") if isinstance(_raw, dict) else None
-        ) or []
-        by_path = {
-            it["file_path"]: it
-            for it in raw_items
-            if isinstance(it, dict) and it.get("file_path")
-        }
-        applied = 0
-        for idx, item in enumerate(state.pending_user_decisions):
-            payload = by_path.get(item.file_path)
-            if not payload:
-                continue
-            choice = payload.get("user_choice")
-            if not choice:
-                continue
-            # Never overwrite an already-decided item; user must clear it
-            # via a fresh run if they changed their mind.
-            if item.user_choice is not None:
-                continue
-            valid_keys = {o.key for o in item.options}
-            if choice not in valid_keys:
-                console.print(
-                    f"[red]Invalid user_choice {choice!r} for "
-                    f"{item.file_path} (valid: {sorted(valid_keys)})[/red]"
-                )
-                sys.exit(1)
-            state.pending_user_decisions[idx] = item.model_copy(
-                update={
-                    "user_choice": choice,
-                    "user_input": payload.get("notes"),
-                }
-            )
-            applied += 1
-        if applied:
-            console.print(f"[green]Applied {applied} per-file choices[/green]")
-
-        if plan_approval and state.plan_human_review is None:
-            try:
-                pd = PlanHumanDecision(str(plan_approval).lower())
-            except ValueError:
-                console.print(
-                    f"[red]Invalid plan_approval: {plan_approval!r} "
-                    f"(expected approve|reject|modify)[/red]"
-                )
-                sys.exit(1)
-
-            state.plan_human_review = PlanHumanReview(
-                decision=pd,
-                reviewer_name=(_raw.get("reviewer") if isinstance(_raw, dict) else None)
-                or "cli",
-                reviewer_notes=(_raw.get("notes") if isinstance(_raw, dict) else None),
-                item_decisions=list(state.pending_user_decisions),
-            )
-            console.print(
-                f"[green]Plan approval set to {pd.value!r} via decisions file[/green]"
-            )
-        elif applied and state.plan_human_review is not None:
-            # Keep plan_human_review.item_decisions snapshot in sync with
-            # the updated pending_user_decisions so downstream consumers
-            # see the latest user_choice values.
-            state.plan_human_review = state.plan_human_review.model_copy(
-                update={"item_decisions": list(state.pending_user_decisions)}
-            )
-
-        judge_resolution = (
-            _raw.get("judge_resolution") if isinstance(_raw, dict) else None
+        # V1 yaml wraps into a single-round bundle; V2 may carry multiple
+        # rounds. ``resume`` consumes one matching round per call. The CI
+        # ``--auto-decisions`` driver loops AWAITING_HUMAN cycles itself; this
+        # single-pass path keeps backwards compatibility with the legacy
+        # one-round resume workflow.
+        current_phase = detect_current_phase(state)
+        round_to_apply = (
+            bundle.take_round(current_phase) if current_phase else None
         )
-        if judge_resolution is not None:
-            val = str(judge_resolution).lower().strip()
-            if val not in {"accept", "abort", "rerun"}:
-                console.print(
-                    f"[red]Invalid judge_resolution: {judge_resolution!r} "
-                    f"(expected accept|abort|rerun)[/red]"
-                )
+        if round_to_apply is None and bundle.rounds:
+            # Fall back to the first round when the V1 path detector cannot
+            # pin down a phase but a single round is unambiguously available.
+            round_to_apply = bundle.rounds.pop(0)
+        if round_to_apply is not None:
+            try:
+                stats = apply_round(state, round_to_apply)
+            except ValueError as exc:
+                console.print(f"[red]{exc}[/red]")
                 sys.exit(1)
-            state.judge_resolution = val  # type: ignore[assignment]
-            console.print(
-                f"[green]Judge resolution set to {val!r} via decisions file[/green]"
-            )
-
-        pending = [
-            req
-            for req in state.human_decision_requests.values()
-            if req.human_decision is None
-        ]
-        if pending:
-            hi = HumanInterfaceAgent(state.config.agents.human_interface)
-            updated = asyncio.run(hi.collect_decisions_file(decisions, pending))
-            decided_count = 0
-            for req in updated:
-                if req.human_decision is not None:
-                    state.human_decision_requests[req.file_path] = req
-                    state.human_decisions[req.file_path] = req.human_decision
-                    decided_count += 1
-            console.print(
-                f"[green]Loaded {decided_count} decisions from {decisions}[/green]"
-            )
-
-            # When all decisions are in, the next orchestrator.run() will
-            # re-enter HumanReviewPhase which now sees 0 pending requests
-            # and routes through executor → JUDGE_REVIEWING on its own.
-            # (A prior version tried `sm.transition(state, AWAITING_HUMAN, …)`
-            # here which is a no-op same-state transition; the state machine
-            # rejects same-state transitions, so we just fall through.)
+            if stats["item_choices"]:
+                console.print(
+                    f"[green]Applied {stats['item_choices']} per-file choices[/green]"
+                )
+            if stats["plan_approval_set"]:
+                console.print(
+                    f"[green]Plan approval set to "
+                    f"{round_to_apply.plan_approval!r} via decisions file[/green]"
+                )
+            if stats["judge_resolution_set"]:
+                console.print(
+                    f"[green]Judge resolution set to "
+                    f"{round_to_apply.judge_resolution!r} via decisions file[/green]"
+                )
+            if stats["conflict_decisions"]:
+                console.print(
+                    f"[green]Loaded {stats['conflict_decisions']} "
+                    f"conflict decisions from {decisions}[/green]"
+                )
 
     orchestrator = Orchestrator(state.config)
 

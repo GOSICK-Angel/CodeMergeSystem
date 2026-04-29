@@ -219,7 +219,9 @@ class TestMergeCommand:
         ):
             runner.invoke(cli, ["merge", "upstream/main", "--no-tui"])
 
-        mock_run.assert_called_once_with(fake_config, False, ci=False)
+        mock_run.assert_called_once_with(
+            fake_config, False, ci=False, auto_decisions=None
+        )
 
     def test_merge_ci_flag_routes_to_run(self) -> None:
         from src.cli.main import cli
@@ -232,7 +234,9 @@ class TestMergeCommand:
         ):
             runner.invoke(cli, ["merge", "upstream/main", "--ci"])
 
-        mock_run.assert_called_once_with(fake_config, False, ci=True)
+        mock_run.assert_called_once_with(
+            fake_config, False, ci=True, auto_decisions=None
+        )
 
 
 class TestDefaultGroup:

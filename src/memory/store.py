@@ -76,8 +76,17 @@ class MemoryStore:
         return self._memory.phase_summaries.get(phase)
 
     def get_relevant_context(
-        self, file_paths: list[str], max_entries: int = 10
+        self,
+        file_paths: list[str],
+        max_entries: int = 10,
+        min_relevance: float = 0.0,
     ) -> list[MemoryEntry]:
+        """Score-rank entries by path overlap × confidence.
+
+        ``min_relevance`` (O-M3) drops entries below the threshold *before*
+        truncating to ``max_entries``. Use this when the entry pool is large
+        (>~100) to keep injected prompts under the context window cap.
+        """
         scored: dict[str, tuple[float, MemoryEntry]] = {}
         for entry in self._memory.entries:
             path_score = 0.0
@@ -93,7 +102,7 @@ class MemoryStore:
                 path_score = 0.1
 
             relevance = path_score * 0.5 + entry.confidence * 0.5
-            if relevance > 0.0:
+            if relevance > 0.0 and relevance >= min_relevance:
                 scored[entry.entry_id] = (relevance, entry)
 
         ranked = sorted(scored.values(), key=lambda x: x[0], reverse=True)

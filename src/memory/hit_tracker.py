@@ -21,7 +21,11 @@ from typing import Literal
 
 Layer = Literal["l0", "l1_patterns", "l1_decisions", "l2"]
 
-_SCHEMA_VERSION = 1
+# Schema bump: v2 adds per-file-injection map + per-entry outcome stats so
+# we can credit/blame memory entries based on the Judge's final verdict
+# (O-M4). v1 sidecars are treated as empty (loader bails on version
+# mismatch); the next save migrates to v2.
+_SCHEMA_VERSION = 2
 
 
 class MemoryHitTracker:
@@ -31,6 +35,13 @@ class MemoryHitTracker:
         self._hit_calls_by_phase: dict[str, int] = defaultdict(int)
         self._entries_by_phase_layer: dict[str, dict[str, int]] = defaultdict(
             lambda: defaultdict(int)
+        )
+        # O-M4: per-file injection map (in-memory; folded into per-entry
+        # outcomes when record_outcome fires).
+        self._injections_by_file: dict[str, set[str]] = defaultdict(set)
+        # entry_id → {"pass": n, "fail": m} (persisted)
+        self._entry_outcomes: dict[str, dict[str, int]] = defaultdict(
+            lambda: {"pass": 0, "fail": 0}
         )
         self._persist_path: Path | None = None
         if persist_path is not None:
@@ -53,6 +64,36 @@ class MemoryHitTracker:
             if self._persist_path is not None:
                 self._persist_unsafe()
 
+    def record_injection(self, file_paths: list[str], entry_ids: list[str]) -> None:
+        """O-M4: remember which entries were injected for each file_path.
+
+        Folded into per-entry pass/fail counters when ``record_outcome``
+        fires for that file_path. Cheap and additive — multiple injections
+        for the same file accumulate into the union.
+        """
+        if not entry_ids:
+            return
+        with self._lock:
+            for fp in file_paths:
+                self._injections_by_file[fp].update(entry_ids)
+
+    def record_outcome(self, file_path: str, success: bool) -> None:
+        """O-M4: credit or blame entries that were injected for ``file_path``.
+
+        Called by JudgeReviewPhase after the final verdict — once per
+        passed_files entry (success=True) and per failed_files entry
+        (success=False). Increments per-entry counters and persists.
+        """
+        with self._lock:
+            entry_ids = self._injections_by_file.get(file_path)
+            if not entry_ids:
+                return
+            key = "pass" if success else "fail"
+            for eid in entry_ids:
+                self._entry_outcomes[eid][key] += 1
+            if self._persist_path is not None:
+                self._persist_unsafe()
+
     def _load_unsafe(self) -> None:
         try:
             assert self._persist_path is not None
@@ -68,6 +109,12 @@ class MemoryHitTracker:
         for phase, layers in (data.get("entries_by_phase_layer") or {}).items():
             for layer, count in (layers or {}).items():
                 self._entries_by_phase_layer[phase][layer] = int(count)
+        for eid, counters in (data.get("entry_outcomes") or {}).items():
+            if isinstance(counters, dict):
+                self._entry_outcomes[eid] = {
+                    "pass": int(counters.get("pass", 0)),
+                    "fail": int(counters.get("fail", 0)),
+                }
 
     def _persist_unsafe(self) -> None:
         assert self._persist_path is not None
@@ -80,6 +127,10 @@ class MemoryHitTracker:
             "entries_by_phase_layer": {
                 phase: dict(layers)
                 for phase, layers in self._entries_by_phase_layer.items()
+            },
+            "entry_outcomes": {
+                eid: dict(counters)
+                for eid, counters in self._entry_outcomes.items()
             },
         }
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -109,4 +160,42 @@ class MemoryHitTracker:
                 "hit_rate": hit_rate,
                 "by_phase": by_phase,
                 "by_layer": dict(by_layer),
+                "outcomes": self._outcomes_summary_unsafe(),
             }
+
+    def _outcomes_summary_unsafe(self) -> dict[str, object]:
+        ranked: list[tuple[str, int, int, float]] = []
+        for eid, counters in self._entry_outcomes.items():
+            p = counters.get("pass", 0)
+            f = counters.get("fail", 0)
+            total = p + f
+            if total == 0:
+                continue
+            score = (p - f) / total  # +1 always helpful, -1 always harmful
+            ranked.append((eid, p, f, score))
+        if not ranked:
+            return {"tracked_entries": 0, "top_helpful": [], "top_harmful": []}
+        ranked.sort(key=lambda x: x[3], reverse=True)
+        helpful = [
+            {"entry_id": eid, "pass": p, "fail": f, "score": round(s, 3)}
+            for eid, p, f, s in ranked[:5]
+            if s > 0
+        ]
+        harmful = [
+            {"entry_id": eid, "pass": p, "fail": f, "score": round(s, 3)}
+            for eid, p, f, s in reversed(ranked[-5:])
+            if s < 0
+        ]
+        return {
+            "tracked_entries": len(ranked),
+            "top_helpful": helpful,
+            "top_harmful": harmful,
+        }
+
+    def entry_outcome(self, entry_id: str) -> dict[str, int]:
+        """Return per-entry counters; useful for tests / external scoring."""
+        with self._lock:
+            counters = self._entry_outcomes.get(entry_id)
+            if counters is None:
+                return {"pass": 0, "fail": 0}
+            return dict(counters)

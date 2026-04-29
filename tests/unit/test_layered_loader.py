@@ -246,3 +246,65 @@ class TestCombinedLayers:
 
         assert "## Project Profile" in result
         assert "## Relevant Patterns" in result
+
+
+class TestOM3DynamicCaps:
+    """O-M3: layered loader tightens L2 cap and applies relevance threshold
+    when MemoryStore grows past configured thresholds."""
+
+    def _build_store_with_n_entries(self, n: int) -> MemoryStore:
+        store = MemoryStore()
+        for i in range(n):
+            store = store.add_entry(
+                MemoryEntry(
+                    entry_type=MemoryEntryType.PATTERN,
+                    phase="planning",
+                    content=f"entry-{i}",
+                    file_paths=["src/main.py"],
+                    confidence=0.9,
+                    confidence_level=ConfidenceLevel.INFERRED,
+                )
+            )
+        return store
+
+    def test_default_cap_under_threshold(self):
+        from src.memory.layered_loader import LayeredMemoryLoader
+
+        store = self._build_store_with_n_entries(20)
+        loader = LayeredMemoryLoader(store)
+        result = loader.load_for_agent("planning", file_paths=["src/main.py"])
+        relevant_lines = [ln for ln in result.splitlines() if ln.startswith("- [")]
+        assert len(relevant_lines) <= 8
+
+    def test_tightened_cap_when_over_100(self):
+        from src.memory.layered_loader import LayeredMemoryLoader
+
+        store = self._build_store_with_n_entries(150)
+        loader = LayeredMemoryLoader(store)
+        result = loader.load_for_agent("planning", file_paths=["src/main.py"])
+        relevant_lines = [ln for ln in result.splitlines() if ln.startswith("- [")]
+        assert len(relevant_lines) <= 6
+
+    def test_tightened_cap_when_over_200(self):
+        from src.memory.layered_loader import LayeredMemoryLoader
+
+        store = self._build_store_with_n_entries(250)
+        loader = LayeredMemoryLoader(store)
+        result = loader.load_for_agent("planning", file_paths=["src/main.py"])
+        relevant_lines = [ln for ln in result.splitlines() if ln.startswith("- [")]
+        assert len(relevant_lines) <= 4
+
+    def test_min_relevance_only_active_above_threshold(self):
+        """min_relevance is gated by relevance_filter_threshold so small
+        stores keep their original behavior."""
+        from src.memory.layered_loader import LayeredMemoryLoader
+
+        store = self._build_store_with_n_entries(20)
+        loader = LayeredMemoryLoader(
+            store,
+            min_relevance=0.99,
+            relevance_filter_threshold=100,
+        )
+        result = loader.load_for_agent("planning", file_paths=["src/main.py"])
+        relevant_lines = [ln for ln in result.splitlines() if ln.startswith("- [")]
+        assert len(relevant_lines) > 0

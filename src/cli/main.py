@@ -53,6 +53,17 @@ def cli() -> None:
         "(standard|careful|fast|analysis-only). Overrides legacy flags where they overlap."
     ),
 )
+@click.option(
+    "--auto-decisions",
+    default=None,
+    type=click.Path(exists=True),
+    help=(
+        "V2 decisions YAML pre-populated with rounds for every AWAITING_HUMAN "
+        "cycle (plan_review / conflict_marker / conflict_resolution / "
+        "judge_review). Drives the run end-to-end without operator "
+        "intervention; intended for CI."
+    ),
+)
 def merge_command(
     target_branch: str,
     ci: bool,
@@ -61,6 +72,7 @@ def merge_command(
     ws_port: int,
     reconfigure: bool,
     workflow: str | None,
+    auto_decisions: str | None,
 ) -> None:
     """Merge TARGET_BRANCH into the current branch (one-stop flow)."""
     from src.cli.commands.setup import detect_or_setup
@@ -97,7 +109,7 @@ def merge_command(
 
     from src.cli.commands.run import run_command_impl
 
-    run_command_impl(config, dry_run, ci=ci)
+    run_command_impl(config, dry_run, ci=ci, auto_decisions=auto_decisions)
 
 
 @cli.command("resume")
