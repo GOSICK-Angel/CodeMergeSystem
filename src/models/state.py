@@ -181,6 +181,22 @@ class MergeState(BaseModel):
     errors: list[dict[str, Any]] = Field(default_factory=list)
     messages: list[dict[str, Any]] = Field(default_factory=list)
 
+    cost_summary: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Snapshot of CostTracker.summary() refreshed before each "
+            "checkpoint save. Persisted so token/cost telemetry survives "
+            "halts at AWAITING_HUMAN (which exit before report_generation)."
+        ),
+    )
+    memory_summary: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Snapshot of MemoryHitTracker.summary() refreshed before each "
+            "checkpoint save. Mirror of cost_summary for memory telemetry."
+        ),
+    )
+
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     checkpoint_path: str | None = None

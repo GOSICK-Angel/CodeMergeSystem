@@ -1,0 +1,7 @@
+Resuming run 2448e309-6fbb-46ed-a8c5-637b9fe21908
+  Current status: awaiting_human
+Applied 2 per-file choices
+Plan approval set to 'approve' via decisions file
+cache_strategy='system_and_recent' has no effect on OpenAI (gpt-5.4); Anthropic-only. Set cache_strategy='none' to silence this warning.
+Still awaiting human decisions
+  Pending: 0 files

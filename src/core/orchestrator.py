@@ -267,6 +267,7 @@ class Orchestrator:
                     self._inject_memory()
 
                 if outcome.should_checkpoint:
+                    self._snapshot_telemetry(state)
                     self.checkpoint.save(state, outcome.checkpoint_tag)
 
                 if outcome.extra.get("paused"):
@@ -288,6 +289,7 @@ class Orchestrator:
                 self.state_machine.transition(state, SystemStatus.FAILED, str(e))
             except ValueError:
                 pass
+            self._snapshot_telemetry(state)
             self.checkpoint.save(state, "failed")
 
         await self._hooks.emit(
@@ -414,6 +416,23 @@ class Orchestrator:
     def _inject_cost_tracker(self, phase: str = "") -> None:
         for agent in self._all_agents:
             agent.set_cost_tracker(self._cost_tracker, phase=phase)
+
+    def _snapshot_telemetry(self, state: MergeState) -> None:
+        """Persist CostTracker / MemoryHitTracker summaries onto state.
+
+        Without this, halts at AWAITING_HUMAN exit before
+        report_generation runs and the run's token/cost/memory data is
+        lost entirely (checkpoint shows zero LLM activity even when the
+        planner + planner_judge made several calls).
+        """
+        try:
+            state.cost_summary = self._cost_tracker.summary()
+        except Exception:
+            logger.debug("cost_tracker.summary() failed", exc_info=True)
+        try:
+            state.memory_summary = self._memory_hit_tracker.summary()
+        except Exception:
+            logger.debug("memory_hit_tracker.summary() failed", exc_info=True)
 
     def _inject_hooks(self) -> None:
         for agent in self._all_agents:

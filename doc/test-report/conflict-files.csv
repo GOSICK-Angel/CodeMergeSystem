@@ -1,0 +1,13 @@
+file_path,plugin,effective_author,class,conflict_kind,system_strategy,resolution_summary,result
+models/tongyi/manifest.yaml,models/tongyi,cvte,cvte model-hosting,upstream changed author/version,preserve local cvte manifest,保留本地 author: cvte 与 version 0.1.4；未采用 upstream author/langgenius 与 0.1.17,PASS
+models/tongyi/models/llm/_position.yaml,models/tongyi,cvte,cvte model-hosting,model list addition,semantic_merge,保留 cvte 托管插件结构，并融合 upstream glm-4.7 排序项,PASS
+models/tongyi/models/llm/glm-4.7.yaml,models/tongyi,cvte,cvte model-hosting,model config file,take_target / already present locally,模型配置可用，未破坏本地 manifest author,PASS
+extensions/openai_compatible/manifest.yaml,extensions/openai_compatible,langgenius,non-cvte,version conflict,take_target,非 cvte，采用 upstream version 0.0.9,PASS
+models/deepseek/manifest.yaml,models/deepseek,langgenius,non-cvte,version conflict,take_target,非 cvte，采用 upstream version bump,PASS
+models/openai_api_compatible/manifest.yaml,models/openai_api_compatible,langgenius,non-cvte,version conflict,take_target,非 cvte，采用 upstream version bump,PASS
+models/minimax/manifest.yaml,models/minimax,langgenius,non-cvte,B-class mismatch repair,semantic_merge repair to upstream,最终 version 0.0.10 与 upstream 一致,PASS
+models/siliconflow/requirements.txt,models/siliconflow,langgenius,non-cvte target-only,conflict marker cleanup,take_target then repair,人工决策为 take_target；judge repair 后内容等价 upstream,PASS
+models/siliconflow/models/llm/_position.yaml,models/siliconflow,langgenius,non-cvte target-only,conflict marker cleanup,take_target then repair,人工决策为 take_target；judge repair 后内容等价 upstream,PASS
+models/siliconflow/manifest.yaml,models/siliconflow,langgenius,non-cvte target-only,unresolved conflict marker,missing from pending decisions,文件仍为未跟踪文件并包含 <<<<<<< / ======= / >>>>>>>；YAML 解析失败,FAIL
+agent-strategies/cot_agent/strategies/function_calling.py,agent-strategies/cot_agent,langgenius,non-cvte,judge B-class mismatch,take_target attempted,judge 终审判定与 upstream 不一致，critical,FAIL
+models/deepseek/models/llm/llm.py,models/deepseek,langgenius,non-cvte,large upstream refactor,escalate_human / judge info,judge 认为语义可接受，非阻塞,INFO

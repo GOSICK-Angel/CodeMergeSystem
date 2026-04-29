@@ -260,7 +260,10 @@ class SQLiteMemoryStore:
         return PhaseSummary.model_validate_json(row["data"])
 
     def get_relevant_context(
-        self, file_paths: list[str], max_entries: int = 10
+        self,
+        file_paths: list[str],
+        max_entries: int = 10,
+        min_relevance: float = 0.0,
     ) -> list[MemoryEntry]:
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM memory_entries").fetchall()
@@ -282,7 +285,7 @@ class SQLiteMemoryStore:
                 path_score = 0.1
 
             relevance = path_score * 0.5 + entry.confidence * 0.5
-            if relevance > 0.0:
+            if relevance > 0.0 and relevance >= min_relevance:
                 scored[entry.entry_id] = (relevance, entry)
 
         ranked = sorted(scored.values(), key=lambda x: x[0], reverse=True)

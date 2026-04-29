@@ -1,0 +1,19 @@
+╭─────────────────────────────────── merge ────────────────────────────────────╮
+│ Code Merge System                                                            │
+│                                                                              │
+│   Target:  upgrade/0.6.0 → 0.6.0                                             │
+│   Repo:    /Users/angel/AI/project/dify-plugin-daemon                        │
+│   Config:  /Users/angel/AI/project/dify-plugin-daemon/.merge/config.yaml     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+cache_strategy='system_and_recent' has no effect on OpenAI (gpt-5.4); Anthropic-only. Set cache_strategy='none' to silence this warning.
+{
+  "status": "needs_human",
+  "run_id": "2448e309-6fbb-46ed-a8c5-637b9fe21908",
+  "total_files": 176,
+  "auto_merged": 140,
+  "human_required": 0,
+  "human_decided": 0,
+  "failed_count": 0,
+  "judge_verdict": "none",
+  "errors": []
+}

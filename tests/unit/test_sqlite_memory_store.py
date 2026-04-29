@@ -191,6 +191,16 @@ class TestGetRelevantContext:
         contents = [r.content for r in results]
         assert "global no path" in contents
 
+    def test_filters_by_min_relevance(self, store: SQLiteMemoryStore) -> None:
+        store.add_entry(_entry("api insight", file_paths=["api/x.py"], confidence=0.8))
+        store.add_entry(_entry("unrelated insight", file_paths=["docs/y.md"]))
+
+        results = store.get_relevant_context(
+            ["api/x.py"], max_entries=10, min_relevance=0.9
+        )
+
+        assert [r.content for r in results] == ["api insight"]
+
 
 class TestRemoveSuperseded:
     def test_removes_earlier_phase_entries(self, store: SQLiteMemoryStore) -> None:

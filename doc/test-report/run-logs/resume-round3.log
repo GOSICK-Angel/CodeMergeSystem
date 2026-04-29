@@ -1,0 +1,6 @@
+Resuming run 2448e309-6fbb-46ed-a8c5-637b9fe21908
+  Current status: awaiting_human
+Loaded 175 conflict decisions from 
+.merge/decisions_round3_conflict_resolution.yaml
+cache_strategy='system_and_recent' has no effect on OpenAI (gpt-5.4); Anthropic-only. Set cache_strategy='none' to silence this warning.
+Merge completed successfully!
