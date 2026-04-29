@@ -5,6 +5,11 @@ import logging
 from pathlib import Path
 
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
+from src.models.decision import (
+    DecisionSource,
+    FileDecisionRecord,
+    MergeDecision,
+)
 from src.models.diff import (
     FileDiff,
     FileChangeCategory,
@@ -18,6 +23,7 @@ from src.tools.file_classifier import (
     category_summary,
     compute_risk_score,
     is_security_sensitive,
+    matches_any_pattern,
 )
 from src.tools.pollution_auditor import PollutionAuditor
 from src.tools.config_drift_detector import ConfigDriftDetector
@@ -140,6 +146,15 @@ class InitializePhase(Phase):
             fp for fp, cat in file_categories.items() if cat in actionable_categories
         }
 
+        forced_paths = self._apply_forced_decisions(state, ctx, file_categories)
+        if forced_paths:
+            actionable_paths -= forced_paths
+            ctx.notify(
+                "orchestrator",
+                f"Force-decision policy pre-resolved {len(forced_paths)} files; "
+                f"{len(actionable_paths)} remain for AI flow",
+            )
+
         ctx.notify(
             "orchestrator",
             f"Building diffs for {len(actionable_paths)} actionable files",
@@ -222,6 +237,137 @@ class InitializePhase(Phase):
 
         if state.config.reverse_impact.enabled:
             self._run_reverse_impact(state, ctx, merge_base)
+
+    def _apply_forced_decisions(
+        self,
+        state: MergeState,
+        ctx: PhaseContext,
+        file_categories: dict[str, FileChangeCategory],
+    ) -> set[str]:
+        """Pre-decide files matching always_take_upstream/current_patterns
+        before they enter the AI flow. Returns the set of paths consumed.
+
+        always_take_upstream_patterns -> MergeDecision.TAKE_TARGET (file
+        content is checked-out from upstream_ref into the working tree).
+        always_take_current_patterns  -> MergeDecision.TAKE_CURRENT (no
+        write needed; D_MISSING paths stay absent).
+        Upstream wins on overlap: a path matching both lists is forced
+        to TAKE_TARGET (more explicit "must come from upstream").
+        """
+        fc = state.config.file_classifier
+        upstream_patterns = list(fc.always_take_upstream_patterns)
+        # Legacy alias kept functional: always_take_target_patterns shares
+        # the same semantic ("force take upstream") and is honored here so
+        # both names work.
+        upstream_patterns += list(fc.always_take_target_patterns)
+        current_patterns = list(fc.always_take_current_patterns)
+
+        if not upstream_patterns and not current_patterns:
+            return set()
+
+        forced_target: list[tuple[str, FileChangeCategory]] = []
+        forced_current: list[tuple[str, FileChangeCategory]] = []
+        for fp, cat in file_categories.items():
+            if upstream_patterns and matches_any_pattern(fp, upstream_patterns):
+                forced_target.append((fp, cat))
+                continue
+            if current_patterns and matches_any_pattern(fp, current_patterns):
+                forced_current.append((fp, cat))
+
+        consumed: set[str] = set()
+
+        for fp, cat in forced_target:
+            self._force_take_target(state, ctx, fp, cat)
+            consumed.add(fp)
+
+        for fp, cat in forced_current:
+            self._force_take_current(state, fp, cat)
+            consumed.add(fp)
+
+        if forced_target or forced_current:
+            logger.info(
+                "Force-decision policy: %d TAKE_TARGET, %d TAKE_CURRENT "
+                "pre-resolved before AI flow",
+                len(forced_target),
+                len(forced_current),
+            )
+        return consumed
+
+    def _force_take_target(
+        self,
+        state: MergeState,
+        ctx: PhaseContext,
+        file_path: str,
+        category: FileChangeCategory,
+    ) -> None:
+        upstream_ref = state.config.upstream_ref
+        repo_root = Path(state.config.repo_path).resolve()
+        target_path = repo_root / file_path
+        write_status = "kept_present"
+        try:
+            content = ctx.git_tool.get_file_bytes(upstream_ref, file_path)
+            if content is None:
+                if target_path.exists():
+                    target_path.unlink()
+                    write_status = "deleted"
+                else:
+                    write_status = "absent_noop"
+            else:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                target_path.write_bytes(content)
+                write_status = "written_from_upstream"
+        except Exception as e:
+            logger.error(
+                "Force TAKE_TARGET write failed for %s: %s", file_path, e
+            )
+            raise
+
+        file_status = (
+            FileStatus.ADDED
+            if category == FileChangeCategory.D_MISSING
+            else FileStatus.MODIFIED
+        )
+        state.file_decision_records[file_path] = FileDecisionRecord(
+            file_path=file_path,
+            file_status=file_status,
+            decision=MergeDecision.TAKE_TARGET,
+            decision_source=DecisionSource.AUTO_PLANNER,
+            confidence=1.0,
+            rationale=(
+                f"matched always_take_upstream_patterns "
+                f"(category={category.value}, write={write_status})"
+            ),
+            phase="initialize",
+            agent="force_decision_policy",
+        )
+
+    def _force_take_current(
+        self,
+        state: MergeState,
+        file_path: str,
+        category: FileChangeCategory,
+    ) -> None:
+        # Working tree is already at fork_ref content; D_MISSING paths
+        # are naturally absent. No file I/O needed.
+        if category == FileChangeCategory.D_MISSING:
+            file_status = FileStatus.DELETED
+        elif category == FileChangeCategory.D_EXTRA:
+            file_status = FileStatus.ADDED
+        else:
+            file_status = FileStatus.MODIFIED
+        state.file_decision_records[file_path] = FileDecisionRecord(
+            file_path=file_path,
+            file_status=file_status,
+            decision=MergeDecision.TAKE_CURRENT,
+            decision_source=DecisionSource.AUTO_PLANNER,
+            confidence=1.0,
+            rationale=(
+                f"matched always_take_current_patterns "
+                f"(category={category.value}, no write needed)"
+            ),
+            phase="initialize",
+            agent="force_decision_policy",
+        )
 
     def _resolve_project_context(self, state: MergeState, ctx: PhaseContext) -> None:
         repo_root = Path(state.config.repo_path).resolve()

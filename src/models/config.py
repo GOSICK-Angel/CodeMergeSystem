@@ -161,8 +161,33 @@ class FileClassifierConfig(BaseModel):
     binary_extensions: list[str] = Field(
         default_factory=lambda: [".png", ".jpg", ".pdf", ".zip", ".tar", ".whl"]
     )
-    always_take_target_patterns: list[str] = Field(default_factory=list)
-    always_take_current_patterns: list[str] = Field(default_factory=list)
+    always_take_target_patterns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Legacy alias of always_take_upstream_patterns. Kept for "
+            "backward compatibility — when matched, file is forced to "
+            "TAKE_TARGET (= take upstream_ref version) via low-risk score."
+        ),
+    )
+    always_take_upstream_patterns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Paths whose final content must come from upstream_ref. "
+            "Matched files are pre-decided as MergeDecision.TAKE_TARGET "
+            "in InitializePhase, skip planner/executor/judge entirely, "
+            "and have their content force-checked-out from upstream_ref."
+        ),
+    )
+    always_take_current_patterns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Paths whose final content must come from fork_ref (the "
+            "working baseline). Matched files are pre-decided as "
+            "MergeDecision.TAKE_CURRENT in InitializePhase, skip the "
+            "AI flow entirely. For D_MISSING paths the file remains "
+            "absent (not created from upstream)."
+        ),
+    )
     security_sensitive: SecuritySensitiveConfig = Field(
         default_factory=SecuritySensitiveConfig
     )
