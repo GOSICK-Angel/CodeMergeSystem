@@ -110,46 +110,108 @@ class Coordinator:
         raw = int(window * cfg.context_utilization_ratio / cfg.avg_tokens_per_file)
         return max(1, raw)
 
-    def enforce_batch_limits(self, plan: MergePlan) -> MergePlan:
+    def enforce_batch_limits(
+        self,
+        plan: MergePlan,
+        file_size_hints: dict[str, int] | None = None,
+    ) -> MergePlan:
         """Split any PhaseFileBatch that exceeds the computed size cap.
 
         Uses the planner's configured model for context window lookup.
         Returns a new MergePlan if any batch was split; otherwise returns
         the original plan unchanged.
+
+        When ``file_size_hints`` is provided (file_path → estimated tokens),
+        a token-aware secondary split is applied after the file-count split:
+        any sub-batch whose summed estimated tokens exceeds
+        ``coordinator.max_tokens_per_batch`` is further chopped. This guards
+        against ``model_context_window_exceeded`` errors that the file-count
+        heuristic alone misses for large-diff batches.
         """
         model = self._config.agents.planner.model
         max_size = self.compute_max_batch_size(model)
+        max_tokens = self._config.coordinator.max_tokens_per_batch
 
         new_phases: list[PhaseFileBatch] = []
         changed = False
         for batch in plan.phases:
-            if len(batch.file_paths) <= max_size:
-                new_phases.append(batch)
-                continue
-
-            changed = True
-            sub_count = 0
-            for i in range(0, len(batch.file_paths), max_size):
-                sub_paths = batch.file_paths[i : i + max_size]
-                new_phases.append(
-                    batch.model_copy(
-                        update={"batch_id": str(uuid4()), "file_paths": sub_paths}
-                    )
+            sub_batches = self._split_by_count(batch, max_size)
+            if file_size_hints:
+                sub_batches = self._split_by_tokens(
+                    sub_batches, file_size_hints, max_tokens
                 )
-                sub_count += 1
-
-            logger.info(
-                "Coordinator: split batch %s (%d files) into %d sub-batches "
-                "(max_size=%d)",
-                batch.batch_id,
-                len(batch.file_paths),
-                sub_count,
-                max_size,
-            )
+            if len(sub_batches) > 1 or sub_batches[0] is not batch:
+                changed = True
+                logger.info(
+                    "Coordinator: split batch %s (%d files) into %d sub-batches "
+                    "(max_size=%d, max_tokens=%d, token_aware=%s)",
+                    batch.batch_id,
+                    len(batch.file_paths),
+                    len(sub_batches),
+                    max_size,
+                    max_tokens,
+                    "yes" if file_size_hints else "no",
+                )
+            new_phases.extend(sub_batches)
 
         if not changed:
             return plan
         return plan.model_copy(update={"phases": new_phases})
+
+    @staticmethod
+    def _split_by_count(
+        batch: PhaseFileBatch, max_size: int
+    ) -> list[PhaseFileBatch]:
+        if len(batch.file_paths) <= max_size:
+            return [batch]
+        out: list[PhaseFileBatch] = []
+        for i in range(0, len(batch.file_paths), max_size):
+            sub_paths = batch.file_paths[i : i + max_size]
+            out.append(
+                batch.model_copy(
+                    update={"batch_id": str(uuid4()), "file_paths": sub_paths}
+                )
+            )
+        return out
+
+    @staticmethod
+    def _split_by_tokens(
+        batches: list[PhaseFileBatch],
+        size_hints: dict[str, int],
+        max_tokens: int,
+    ) -> list[PhaseFileBatch]:
+        out: list[PhaseFileBatch] = []
+        for batch in batches:
+            running: list[str] = []
+            running_tokens = 0
+            for fp in batch.file_paths:
+                est = max(0, int(size_hints.get(fp, 0)))
+                if running and running_tokens + est > max_tokens:
+                    out.append(
+                        batch.model_copy(
+                            update={
+                                "batch_id": str(uuid4()),
+                                "file_paths": running,
+                            }
+                        )
+                    )
+                    running = []
+                    running_tokens = 0
+                running.append(fp)
+                running_tokens += est
+            if running:
+                if running == batch.file_paths:
+                    out.append(batch)
+                else:
+                    out.append(
+                        batch.model_copy(
+                            update={
+                                "batch_id": str(uuid4()),
+                                "file_paths": running,
+                            }
+                        )
+                    )
+        return out
 
     # ------------------------------------------------------------------
     # ③ Meta-review result builder

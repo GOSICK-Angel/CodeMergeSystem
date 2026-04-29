@@ -44,16 +44,30 @@ def detect_or_setup(
     target_branch: str,
     repo_path: str = ".",
     reconfigure: bool = False,
+    non_interactive: bool = False,
 ) -> MergeConfig:
     """Load existing config or run interactive wizard.
 
     Returns a validated MergeConfig with upstream_ref = target_branch.
     On first run, also migrates any existing MERGE_RECORD/ directory.
+
+    When ``non_interactive`` is true (set by ``merge --ci``), the function
+    refuses to enter the interactive wizard and the per-run "Press Enter"
+    prompt — config must already exist on disk.
     """
     config_path = get_config_path(repo_path)
 
     if not reconfigure and config_path.exists():
-        return _repeat_run_flow(target_branch, repo_path, config_path)
+        return _repeat_run_flow(
+            target_branch, repo_path, config_path, non_interactive=non_interactive
+        )
+
+    if non_interactive:
+        raise RuntimeError(
+            f"--ci requires existing config at {config_path}; "
+            "run `merge <branch>` once interactively, or pass --reconfigure "
+            "with valid pre-set env vars."
+        )
 
     migrate_merge_record(repo_path)
     return _interactive_setup(target_branch, repo_path)
@@ -106,6 +120,7 @@ def _repeat_run_flow(
     target_branch: str,
     repo_path: str,
     config_path: Path,
+    non_interactive: bool = False,
 ) -> MergeConfig:
     """Show config summary and confirm before starting."""
     try:
@@ -113,6 +128,10 @@ def _repeat_run_flow(
         raw["upstream_ref"] = target_branch
         config = MergeConfig.model_validate(raw)
     except Exception as e:
+        if non_interactive:
+            raise RuntimeError(
+                f"--ci cannot recover from config load error: {e}"
+            ) from e
         console.print(f"[yellow]Config load error: {e}. Re-running setup.[/yellow]")
         return _interactive_setup(target_branch, repo_path)
 
@@ -126,6 +145,9 @@ def _repeat_run_flow(
             border_style="cyan",
         )
     )
+    if non_interactive:
+        return config
+
     console.print("\nPress Enter to start, or [bold]c[/bold] to reconfigure...")
     choice = Prompt.ask("", default="", show_default=False)
     if choice.lower() == "c":

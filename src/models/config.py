@@ -477,6 +477,16 @@ class CoordinatorConfig(BaseModel):
         ge=100,
         description="Token estimate per file used in batch-size calculation.",
     )
+    max_tokens_per_batch: int = Field(
+        default=50_000,
+        ge=1000,
+        description=(
+            "Hard ceiling on estimated tokens per batch. Token-aware "
+            "secondary split kicks in when per-file size hints are supplied "
+            "to enforce_batch_limits — prevents single-batch context-window "
+            "overflows that the file-count heuristic alone misses."
+        ),
+    )
     meta_review_enabled: bool = True
 
 
@@ -571,6 +581,14 @@ class MergeConfig(BaseModel):
         description="O-J2: in dispute rounds, Judge only re-evaluates whether "
         "Executor's repair closed the previously-reported issues and does not "
         "introduce brand-new issues (those roll to meta-review as out-of-scope).",
+    )
+    judge_skip_take_decisions: bool = Field(
+        default=True,
+        description="O-J3: skip per-file LLM judge review for take_target / "
+        "take_current records by verifying the worktree blob equals the "
+        "chosen ref via git hash-object. A drift (worktree != expected ref) "
+        "produces a deterministic CRITICAL issue without invoking the LLM. "
+        "Security-sensitive files always stay in the LLM path.",
     )
     judge_blocking_levels: list[str] = Field(
         default_factory=lambda: ["critical", "high"],

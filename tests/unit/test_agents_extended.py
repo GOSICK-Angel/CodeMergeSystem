@@ -1679,6 +1679,11 @@ class TestJudgeAgent:
 
         mock_git = MagicMock()
         mock_git.repo_path.__truediv__ = MagicMock(return_value=mock_path)
+        # O-J3: keep this test focused on the LLM review path by making the
+        # take-decision short-circuit fall through (returning None forces the
+        # check to skip rather than verify+skip the file).
+        mock_git.get_file_hash = MagicMock(return_value=None)
+        mock_git.get_worktree_blob_sha = MagicMock(return_value=None)
         self.agent.git_tool = mock_git
 
         readonly = ReadOnlyStateView(state)

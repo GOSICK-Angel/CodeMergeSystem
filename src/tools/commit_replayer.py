@@ -12,6 +12,12 @@ logger = logging.getLogger(__name__)
 
 REPLAYABLE_CATEGORIES = frozenset({FileChangeCategory.B, FileChangeCategory.D_MISSING})
 
+# O-R4: stop attempting partial cherry-picks after this many consecutive
+# failures. On heavily diverged forks every per-file cherry-pick fails
+# (paths no longer legal vs commit's parent tree) and each abort costs
+# real wall-clock time. Bail fast and let the apply path handle the rest.
+_PARTIAL_REPLAY_FAILURE_BAIL = 3
+
 
 @dataclass
 class ReplayResult:
@@ -93,19 +99,30 @@ class CommitReplayer:
 
         for commit in replayable:
             sha: str = commit["sha"]
+            before_sha = git_tool.get_head_sha()
             # O-R3: walk the strategy ladder instead of single default try.
             ok, strategy = git_tool.cherry_pick_strategy_ladder(sha)
             if ok:
+                after_sha = git_tool.get_head_sha()
+                # O-B5: track files that *actually* changed in the worktree
+                # rather than commit.files. Strategy options like `-X theirs`
+                # may resolve some files to HEAD content (no change), and
+                # empty cherry-picks may produce no new commit at all.
+                # Marking those files "replayed" hides them from the
+                # downstream take_target path and causes B-class drift that
+                # only Judge can catch, at huge LLM cost.
+                actual_files = git_tool.diff_files_between(before_sha, after_sha)
                 result.replayed_shas.append(sha)
-                commit_files: list[str] = commit.get("files", [])
-                result.replayed_files.extend(commit_files)
+                result.replayed_files.extend(actual_files)
                 result.strategy_used[sha] = strategy
                 logger.info(
-                    "Cherry-picked %s via %s: %s (%d files)",
+                    "Cherry-picked %s via %s: %s (%d files actually changed, "
+                    "%d in commit)",
                     sha[:8],
                     strategy,
                     commit.get("message", ""),
-                    len(commit_files),
+                    len(actual_files),
+                    len(commit.get("files", [])),
                 )
             else:
                 git_tool.cherry_pick_abort()
@@ -136,10 +153,19 @@ class CommitReplayer:
         files from the same commit are expected to be handled by the regular
         apply pipeline.
         """
+        consecutive_failures = 0
+        bailed = False
         for commit in partial_commits:
             sha: str = commit["sha"]
             keep_files: list[str] = list(commit.get("_replay_files", []))
             if not keep_files:
+                continue
+            if bailed:
+                logger.info(
+                    "Partial cherry-pick skipped for %s (bail-out active) — "
+                    "all files fall back to apply",
+                    sha[:8],
+                )
                 continue
             ok, applied = git_tool.cherry_pick_per_file(sha, keep_files)
             if not ok or not applied:
@@ -150,7 +176,18 @@ class CommitReplayer:
                     len(keep_files),
                 )
                 git_tool.cherry_pick_abort()
+                consecutive_failures += 1
+                if consecutive_failures >= _PARTIAL_REPLAY_FAILURE_BAIL:
+                    logger.warning(
+                        "O-R4: %d consecutive partial cherry-pick failures — "
+                        "bailing out, remaining %d commits will skip "
+                        "per-file cherry-pick and go straight to apply",
+                        consecutive_failures,
+                        max(0, len(partial_commits) - partial_commits.index(commit) - 1),
+                    )
+                    bailed = True
                 continue
+            consecutive_failures = 0
             author_name, author_email, message = git_tool.get_commit_author_and_message(
                 sha
             )

@@ -210,6 +210,56 @@ class TestEnforceBatchLimits:
         assert size == 100
 
 
+class TestEnforceBatchLimitsTokenAware:
+    """O-J/Coordinator: token-aware secondary split."""
+
+    def test_no_hints_falls_back_to_count_split(self):
+        cfg = _make_config()
+        cfg.coordinator.max_files_per_batch = 100
+        c = Coordinator(cfg)
+        plan = _make_plan([_make_batch(["a", "b", "c"])])
+        result = c.enforce_batch_limits(plan)
+        assert len(result.phases) == 1
+        assert result.phases[0].file_paths == ["a", "b", "c"]
+
+    def test_token_split_chops_oversized_batches(self):
+        cfg = _make_config()
+        cfg.coordinator.max_files_per_batch = 100
+        cfg.coordinator.max_tokens_per_batch = 1000
+        c = Coordinator(cfg)
+        plan = _make_plan([_make_batch(["a", "b", "c", "d"])])
+        hints = {"a": 600, "b": 600, "c": 600, "d": 600}
+        result = c.enforce_batch_limits(plan, file_size_hints=hints)
+        # Each file is 600 tokens; first lands (running=600), second
+        # 600+600=1200 > 1000 → flush. Repeats: 4 files → 4 sub-batches.
+        assert len(result.phases) == 4
+        assert [b.file_paths for b in result.phases] == [["a"], ["b"], ["c"], ["d"]]
+
+    def test_token_split_keeps_files_within_budget(self):
+        cfg = _make_config()
+        cfg.coordinator.max_files_per_batch = 100
+        cfg.coordinator.max_tokens_per_batch = 1500
+        c = Coordinator(cfg)
+        plan = _make_plan([_make_batch(["a", "b", "c", "d"])])
+        hints = {"a": 600, "b": 600, "c": 600, "d": 600}
+        result = c.enforce_batch_limits(plan, file_size_hints=hints)
+        # 600 (a) → +600=1200 (b fits) → +600=1800 (c overflows) → flush.
+        assert len(result.phases) == 2
+        assert result.phases[0].file_paths == ["a", "b"]
+        assert result.phases[1].file_paths == ["c", "d"]
+
+    def test_missing_hint_treated_as_zero(self):
+        cfg = _make_config()
+        cfg.coordinator.max_files_per_batch = 100
+        cfg.coordinator.max_tokens_per_batch = 500
+        c = Coordinator(cfg)
+        plan = _make_plan([_make_batch(["known", "unknown"])])
+        hints = {"known": 100}  # "unknown" missing → counted as 0 tokens
+        result = c.enforce_batch_limits(plan, file_size_hints=hints)
+        assert len(result.phases) == 1
+        assert result.phases[0].file_paths == ["known", "unknown"]
+
+
 class TestBuildMetaReviewResult:
     def test_fields_populated(self):
         raw = {"assessment": "root cause", "recommendation": "try this"}

@@ -73,6 +73,33 @@ class JudgeAgent(BaseAgent):
             elif fd and fd.is_security_sensitive:
                 high_risk_records[fp] = record
 
+        # O-J3: deterministic short-circuit for take_target / take_current.
+        # The decision semantics say "this file MUST equal upstream/fork ref" —
+        # no semantic merging is involved, so the LLM cannot meaningfully
+        # add anything. Verify the worktree blob == the chosen ref's blob via
+        # git hash-object. Match → skip (reviewed, no issues). Mismatch →
+        # emit a deterministic CRITICAL drift issue (the B-class drift
+        # symptom from the 36-commit run, surfacing per-file). Security-
+        # sensitive files always stay in the LLM path.
+        if getattr(state.config, "judge_skip_take_decisions", False) and self.git_tool:
+            take_skipped, take_drift_issues = self._verify_take_decisions(
+                state, high_risk_records, file_diffs_map
+            )
+            if take_skipped or take_drift_issues:
+                self.logger.info(
+                    "Judge O-J3: skipped %d take_* file(s) (drift=%d)",
+                    len(take_skipped),
+                    len(take_drift_issues),
+                )
+                reviewed_files.extend(take_skipped)
+                all_issues.extend(take_drift_issues)
+                for fp in take_skipped:
+                    high_risk_records.pop(fp, None)
+                for issue in take_drift_issues:
+                    high_risk_records.pop(issue.file_path, None)
+                    if issue.file_path not in reviewed_files:
+                        reviewed_files.append(issue.file_path)
+
         # O-J1: skip per-file LLM review for high-confidence records whose
         # merged content parses cleanly. Security-sensitive files always stay
         # in the LLM path regardless of confidence.
@@ -325,6 +352,65 @@ class JudgeAgent(BaseAgent):
                 dropped_new,
             )
         return kept
+
+    def _verify_take_decisions(
+        self,
+        state: ReadOnlyStateView,
+        high_risk_records: dict[str, FileDecisionRecord],
+        file_diffs_map: dict[str, FileDiff],
+    ) -> tuple[list[str], list[JudgeIssue]]:
+        """O-J3: byte-level verification of take_target / take_current
+        decisions, replacing the LLM call.
+
+        Returns ``(skipped_files, drift_issues)``:
+        - ``skipped_files`` — worktree blob sha matched the chosen ref;
+          treat as reviewed with no issues.
+        - ``drift_issues`` — worktree differs from the chosen ref; emit a
+          deterministic CRITICAL drift issue without asking the LLM.
+
+        Security-sensitive files are NOT short-circuited here — they fall
+        through to the full LLM review path even when the decision is
+        directional.
+        """
+        if self.git_tool is None:
+            return [], []
+        upstream_ref = state.config.upstream_ref
+        fork_ref = state.config.fork_ref
+        skipped: list[str] = []
+        drift_issues: list[JudgeIssue] = []
+        for fp, record in list(high_risk_records.items()):
+            fd = file_diffs_map.get(fp)
+            if fd is None or fd.is_security_sensitive:
+                continue
+            if record.decision == MergeDecision.TAKE_TARGET:
+                expected_ref = upstream_ref
+            elif record.decision == MergeDecision.TAKE_CURRENT:
+                expected_ref = fork_ref
+            else:
+                continue
+            expected_sha = self.git_tool.get_file_hash(expected_ref, fp)
+            worktree_sha = self.git_tool.get_worktree_blob_sha(fp)
+            if expected_sha is None or worktree_sha is None:
+                continue
+            if expected_sha == worktree_sha:
+                skipped.append(fp)
+                continue
+            drift_issues.append(
+                JudgeIssue(
+                    file_path=fp,
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="take_decision_drift",
+                    description=(
+                        f"{record.decision.value} decision but worktree "
+                        f"blob {worktree_sha[:12]} != {expected_ref} blob "
+                        f"{expected_sha[:12]} — patch silently failed or "
+                        f"was overwritten."
+                    ),
+                    must_fix_before_merge=True,
+                    veto_condition=f"{record.decision.value} not enforced",
+                )
+            )
+        return skipped, drift_issues
 
     def _local_syntax_ok(self, file_path: str) -> bool:
         """O-J1 pre-filter: re-use the syntax checker to decide whether a

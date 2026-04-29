@@ -16,7 +16,11 @@ logger = logging.getLogger(__name__)
 
 
 def write_merge_plan_report(state: MergeState) -> Path:
-    """Write a detailed merge plan Markdown report to MERGE_RECORD/.
+    """Write a detailed merge plan Markdown report.
+
+    Path is resolved by ``get_plans_dir`` — ``.merge/plans/`` in production
+    mode (running against any external repo) or ``MERGE_RECORD/`` in dev
+    mode (running against the CodeMergeSystem source tree itself).
 
     Returns the path of the generated file.
     """

@@ -36,6 +36,10 @@ from src.tools.git_committer import GitCommitter
 
 logger = logging.getLogger(__name__)
 
+# O-B5: drift count above which we treat the run as systemic-bug and
+# escalate without running the (very expensive) downstream analysis.
+_B_CLASS_DRIFT_FATAL_THRESHOLD = 100
+
 _DEP_BUMP_RE = re.compile(
     r"(bump|chore[\(\[]deps|update[- ]dep|dependabot|renovate|"
     r"upgrade[- ]dep|security[- ]update|pin[- ]dep)",
@@ -900,10 +904,47 @@ class AutoMergePhase(Phase):
                 dep_bump_applied,
                 len(unhandled_conflict_files),
             )
+        # O-B5: byte-level sanity-check on B-class files. Plan promises these
+        # equal upstream after auto-merge; if not, the take_target path
+        # silently failed somewhere (e.g. cherry-pick `-X theirs` resolved to
+        # HEAD content for some files, replay_clean_commits used to mark them
+        # all replayed regardless). Without this check, the gap is only
+        # caught by Judge — at the cost of 1000+ LLM calls per run.
+        b_drift = await self._b_class_sanity_check(state, ctx)
+        if len(b_drift) > _B_CLASS_DRIFT_FATAL_THRESHOLD:
+            logger.error(
+                "O-B5: B-class sanity-check found %d files drifted from "
+                "upstream (threshold=%d) — escalating to human, likely "
+                "systemic bug. First 10: %s",
+                len(b_drift),
+                _B_CLASS_DRIFT_FATAL_THRESHOLD,
+                b_drift[:10],
+            )
+            state.pending_conflict_files = b_drift
+            return PhaseOutcome(
+                target_status=SystemStatus.AWAITING_HUMAN,
+                reason=(
+                    f"B-class drift ({len(b_drift)} files) exceeds "
+                    f"threshold {_B_CLASS_DRIFT_FATAL_THRESHOLD}"
+                ),
+                checkpoint_tag="after_phase2",
+                memory_phase="auto_merge",
+            )
+        elif b_drift:
+            logger.warning(
+                "O-B5: %d B-class files drifted from upstream — adding to "
+                "conflict analysis queue",
+                len(b_drift),
+            )
+            for fp in b_drift:
+                if fp not in seen:
+                    unhandled_conflict_files.append(fp)
+                    seen.add(fp)
+
         if unhandled_conflict_files:
             logger.info(
                 "Routing %d unhandled files (skipped layers + non-replayable "
-                "commits) to conflict analysis",
+                "commits + B-class drift) to conflict analysis",
                 len(unhandled_conflict_files),
             )
             state.pending_conflict_files = unhandled_conflict_files
@@ -1051,6 +1092,43 @@ class AutoMergePhase(Phase):
                 ],
                 created_at=now,
             )
+
+    async def _b_class_sanity_check(
+        self,
+        state: MergeState,
+        ctx: PhaseContext,
+    ) -> list[str]:
+        """O-B5: compare worktree blob sha vs upstream blob sha for every
+        B-class file in the plan. Returns the list of drifted paths.
+
+        B-class means "upstream changed, fork did not" — after auto-merge
+        the worktree should byte-equal upstream. Anything else is a bug
+        in the take_target / cherry-pick path.
+        """
+        if state.merge_plan is None:
+            return []
+        upstream_ref = state.config.upstream_ref
+        drift: list[str] = []
+        checked = 0
+        for batch in state.merge_plan.phases:
+            if batch.change_category != FileChangeCategory.B:
+                continue
+            for fp in batch.file_paths:
+                checked += 1
+                upstream_sha = ctx.git_tool.get_file_hash(upstream_ref, fp)
+                worktree_sha = ctx.git_tool.get_worktree_blob_sha(fp)
+                if upstream_sha is None or worktree_sha is None:
+                    # File missing on one side; downstream conflict path
+                    # already covers this (D-missing / D-extra logic).
+                    continue
+                if upstream_sha != worktree_sha:
+                    drift.append(fp)
+        logger.info(
+            "O-B5 sanity-check: %d/%d B-class files drift from upstream",
+            len(drift),
+            checked,
+        )
+        return drift
 
     async def _execute_batch(
         self,

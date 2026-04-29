@@ -1,12 +1,12 @@
 """Path resolution for dev mode vs production mode.
 
-Dev mode  — running from the CodeMergeSystem source tree (or MERGE_DEV=1):
+Dev mode  — running CodeMergeSystem against its OWN source tree (or MERGE_DEV=1):
   checkpoint  ./outputs/debug/checkpoints/
   reports     ./outputs/
   plans       <repo>/MERGE_RECORD/
   logs        ./outputs/debug/
 
-Production mode — pip-installed, running inside a target project:
+Production mode — running against any other repo (pip-installed or editable):
   checkpoint  <repo>/.merge/runs/<run_id>/
   reports     <repo>/.merge/runs/<run_id>/
   plans       <repo>/.merge/plans/
@@ -26,8 +26,16 @@ except ImportError:
     _HAS_PLATFORMDIRS = False
 
 
-def is_dev_mode() -> bool:
-    """True when running from the CodeMergeSystem source tree or MERGE_DEV=1."""
+def is_dev_mode(repo_path: str | None = None) -> bool:
+    """True when running CodeMergeSystem against its OWN source tree.
+
+    Editable installs (``pip install -e``) keep the package's pyproject.toml
+    visible to the running interpreter. Without ``repo_path``, that wrongly
+    flagged every run as dev — so when ``repo_path`` is supplied, the
+    function additionally requires the *target* repo to match the package
+    source root. Running against any other repo therefore returns False
+    (prod mode), which sends artifacts into ``.merge/plans/`` as documented.
+    """
     if os.environ.get("MERGE_DEV") == "1":
         return True
     pkg_root = Path(__file__).resolve().parents[2]
@@ -35,7 +43,14 @@ def is_dev_mode() -> bool:
     if not pyproject.exists():
         return False
     try:
-        return "code-merge-system" in pyproject.read_text(encoding="utf-8")
+        if "code-merge-system" not in pyproject.read_text(encoding="utf-8"):
+            return False
+    except OSError:
+        return False
+    if repo_path is None:
+        return True
+    try:
+        return Path(repo_path).resolve() == pkg_root
     except OSError:
         return False
 
@@ -56,7 +71,7 @@ def get_run_dir(repo_path: str = ".", run_id: str = "") -> Path:
     Dev mode:  <repo>/outputs/debug/checkpoints/
     Prod mode: <repo>/.merge/runs/<run_id>/
     """
-    if is_dev_mode():
+    if is_dev_mode(repo_path):
         return Path(repo_path).resolve() / "outputs" / "debug" / "checkpoints"
     return get_project_merge_dir(repo_path) / "runs" / run_id
 
@@ -69,7 +84,7 @@ def get_report_dir(
     Dev mode:  fallback_dir (usually config.output.directory = ./outputs/)
     Prod mode: <repo>/.merge/runs/<run_id>/
     """
-    if is_dev_mode():
+    if is_dev_mode(repo_path):
         return Path(fallback_dir)
     return get_project_merge_dir(repo_path) / "runs" / run_id
 
@@ -80,7 +95,7 @@ def get_plans_dir(repo_path: str = ".") -> Path:
     Dev mode:  <repo>/MERGE_RECORD/
     Prod mode: <repo>/.merge/plans/
     """
-    if is_dev_mode():
+    if is_dev_mode(repo_path):
         return Path(repo_path).resolve() / "MERGE_RECORD"
     return get_project_merge_dir(repo_path) / "plans"
 
@@ -91,7 +106,7 @@ def get_system_log_dir(repo_path: str = ".") -> Path:
     Dev mode:  <repo>/outputs/debug/
     Prod mode: ~/.local/share/code-merge-system/logs/  (XDG/platformdirs)
     """
-    if is_dev_mode():
+    if is_dev_mode(repo_path):
         return Path(repo_path).resolve() / "outputs" / "debug"
     if _HAS_PLATFORMDIRS:
         return Path(_pd.user_data_dir("code-merge-system")) / "logs"

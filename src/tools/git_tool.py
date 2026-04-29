@@ -167,6 +167,27 @@ class GitTool:
         except git.GitCommandError:
             return None
 
+    def get_head_sha(self) -> str:
+        return str(self.repo.git.rev_parse("HEAD")).strip()
+
+    def get_worktree_blob_sha(self, file_path: str) -> str | None:
+        abs_path = self.repo_path / file_path
+        if not abs_path.exists():
+            return None
+        try:
+            return str(self.repo.git.hash_object(str(abs_path))).strip()
+        except git.GitCommandError:
+            return None
+
+    def diff_files_between(self, before_sha: str, after_sha: str) -> list[str]:
+        if before_sha == after_sha:
+            return []
+        try:
+            output = self.repo.git.diff("--name-only", before_sha, after_sha)
+            return [line.strip() for line in output.splitlines() if line.strip()]
+        except git.GitCommandError:
+            return []
+
     def list_files(self, ref: str) -> list[str]:
         try:
             output = self.repo.git.ls_tree("-r", "--name-only", ref)

@@ -239,7 +239,18 @@ class BaseAgent(ABC):
         if self._memory_store is None:
             return ""
         loader = LayeredMemoryLoader(self._memory_store, self._memory_hit_tracker)
-        return loader.load_for_agent(current_phase, file_paths)
+        text = loader.load_for_agent(current_phase, file_paths)
+        if text:
+            section_count = text.count("## ")
+            self.logger.info(
+                "Memory injected: agent=%s phase=%s sections=%d chars=%d files=%d",
+                self.agent_type.value,
+                current_phase,
+                section_count,
+                len(text),
+                len(file_paths or []),
+            )
+        return text
 
     def _get_token_budget(self) -> TokenBudget:
         return TokenBudget(

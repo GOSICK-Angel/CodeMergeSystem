@@ -65,7 +65,12 @@ def merge_command(
     """Merge TARGET_BRANCH into the current branch (one-stop flow)."""
     from src.cli.commands.setup import detect_or_setup
 
-    config = detect_or_setup(target_branch, repo_path=".", reconfigure=reconfigure)
+    config = detect_or_setup(
+        target_branch,
+        repo_path=".",
+        reconfigure=reconfigure,
+        non_interactive=ci,
+    )
 
     if workflow is not None:
         from src.core.workflow_loader import apply_workflow_by_name, load_workflows
