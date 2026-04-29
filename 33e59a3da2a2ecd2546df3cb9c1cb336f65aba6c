@@ -1,0 +1,25 @@
+tests/unit/test_file_classifier.py
+  ec1da612e576d0a5 1-2,5,72-148
+src/tools/file_classifier.py
+  ec1da612e576d0a5 4,7,20-65,67-74,76-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.10",
+  "base_commit_sha": "33e59a3da2a2ecd2546df3cb9c1cb336f65aba6c",
+  "prompts": {
+    "ec1da612e576d0a5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a5ee9cbf-64a3-443d-a164-99ecb11224b9",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Angel",
+      "messages": [],
+      "total_additions": 140,
+      "total_deletions": 14,
+      "accepted_lines": 140,
+      "overriden_lines": 0
+    }
+  }
+}
