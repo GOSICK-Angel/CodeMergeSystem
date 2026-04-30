@@ -1,0 +1,34 @@
+src/agents/planner_agent.py
+  b7676e205b6be627 310-318
+src/core/phases/auto_merge.py
+  b7676e205b6be627 1049
+src/core/phases/initialize.py
+  b7676e205b6be627 91-92
+src/core/orchestrator.py
+  b7676e205b6be627 241-242
+src/cli/commands/tui.py
+  b7676e205b6be627 42
+src/cli/commands/resume.py
+  b7676e205b6be627 108-114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.10",
+  "base_commit_sha": "b792f24985a3f09c576e0725b2298ad094fd49bb",
+  "prompts": {
+    "b7676e205b6be627": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ff0e315f-e52d-48fc-8be4-b845e47848fd",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Angel",
+      "messages": [],
+      "total_additions": 22,
+      "total_deletions": 3,
+      "accepted_lines": 22,
+      "overriden_lines": 0,
+      "messages_url": "https://gitai.gz.cvte.cn/cas/2c024ef282bcdaa6a8acaef77dff3f455a401d1a64edbd141c1eeec27e78f6ad"
+    }
+  }
+}
