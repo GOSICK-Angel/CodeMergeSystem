@@ -1,0 +1,30 @@
+src/models/state.py
+  4eb9716dcb78d255 209-217
+src/cli/commands/run.py
+  4eb9716dcb78d255 157
+tests/unit/test_telemetry_snapshot.py
+  4eb9716dcb78d255 12,166-202
+src/core/orchestrator.py
+  4eb9716dcb78d255 228-238
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.10",
+  "base_commit_sha": "2da663cc41ba226ead6a9bc13c7122d68858428b",
+  "prompts": {
+    "4eb9716dcb78d255": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "def269f8-7dc6-4174-ac5f-089bd8f25cf3",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Angel",
+      "messages": [],
+      "total_additions": 61,
+      "total_deletions": 2,
+      "accepted_lines": 61,
+      "overriden_lines": 0,
+      "messages_url": "https://gitai.gz.cvte.cn/cas/31d7cbc481a42867028b73fcd045e58d5851ddfe90065cae73783d430fe9c503"
+    }
+  }
+}
