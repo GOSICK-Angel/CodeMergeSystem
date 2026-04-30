@@ -9,7 +9,7 @@ made multiple calls.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import git as _git
 
@@ -161,5 +161,44 @@ class TestCostCeiling:
             patch.object(orch.checkpoint, "save"),
         ):
             result = await orch.run(state)
+
+        assert result.status == SystemStatus.AWAITING_HUMAN
+
+
+class TestDryRun:
+    """Verify that dry_run=True stops the orchestrator before AUTO_MERGING."""
+
+    def test_dry_run_field_defaults_false(self, tmp_path):
+        config = _make_config(tmp_path)
+        state = MergeState(config=config)
+        assert state.dry_run is False
+
+    def test_dry_run_field_set_true(self, tmp_path):
+        config = _make_config(tmp_path)
+        state = MergeState(config=config, dry_run=True)
+        assert state.dry_run is True
+
+    async def test_orchestrator_halts_at_awaiting_human_when_dry_run(self, tmp_path):
+        """When state.dry_run=True and next status is AUTO_MERGING, the
+        orchestrator must redirect to AWAITING_HUMAN without starting any
+        executor or judge phases."""
+        config = _make_config(tmp_path)
+
+        with patch("src.core.orchestrator.GitTool") as MockGit:
+            mock_git = MockGit.return_value
+            mock_git.get_merge_base.return_value = "abc123"
+            mock_git.get_changed_files.return_value = []
+
+            orch = Orchestrator(config, agents={})
+
+            state = MergeState(config=config, dry_run=True)
+            state.status = SystemStatus.AUTO_MERGING
+
+            with (
+                patch.object(orch, "_finalize_log"),
+                patch.object(orch, "_snapshot_telemetry"),
+                patch.object(orch.checkpoint, "save"),
+            ):
+                result = await orch.run(state)
 
         assert result.status == SystemStatus.AWAITING_HUMAN

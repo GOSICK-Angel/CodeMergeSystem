@@ -206,6 +206,15 @@ class MergeState(BaseModel):
         ),
     )
 
+    dry_run: bool = Field(
+        default=False,
+        description=(
+            "When True the orchestrator stops after plan_review "
+            "and transitions to AWAITING_HUMAN instead of entering "
+            "AUTO_MERGING. No executor/judge LLM calls are made."
+        ),
+    )
+
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     checkpoint_path: str | None = None

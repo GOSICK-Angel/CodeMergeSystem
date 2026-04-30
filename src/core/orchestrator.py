@@ -225,6 +225,17 @@ class Orchestrator:
 
         try:
             while state.status in PHASE_MAP and state.status not in _TERMINAL:
+                if state.dry_run and state.status == SystemStatus.AUTO_MERGING:
+                    self.state_machine.transition(
+                        state,
+                        SystemStatus.AWAITING_HUMAN,
+                        "dry-run: analysis and plan complete; skipping executor/judge",
+                    )
+                    self._snapshot_telemetry(state)
+                    self.checkpoint.save(state, "dry_run_halt")
+                    self._finalize_log(state, run_start)
+                    return state
+
                 ceiling = state.config.max_cost_usd
                 if ceiling is not None:
                     spent = self._cost_tracker.total_cost_usd

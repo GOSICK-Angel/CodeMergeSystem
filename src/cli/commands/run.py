@@ -154,7 +154,7 @@ def run_command_impl(
 
     _preflight_check_api_keys(config)
 
-    state = MergeState(config=config)
+    state = MergeState(config=config, dry_run=dry_run)
     if not ci:
         console.print(f"[blue]Starting merge run {state.run_id}[/blue]")
         console.print(f"  Upstream: {config.upstream_ref}")
