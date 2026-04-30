@@ -1,0 +1,28 @@
+tests/unit/test_layered_loader.py
+  4eb9716dcb78d255 311-368
+src/memory/layered_loader.py
+  4eb9716dcb78d255 6,8,163
+src/memory/store.py
+  4eb9716dcb78d255 86-95,107-108,110-115,206-255
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.10",
+  "base_commit_sha": "b66333368bbd817d450ee0a93a4dd29fc7a74911",
+  "prompts": {
+    "4eb9716dcb78d255": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "def269f8-7dc6-4174-ac5f-089bd8f25cf3",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Angel",
+      "messages": [],
+      "total_additions": 133,
+      "total_deletions": 3,
+      "accepted_lines": 133,
+      "overriden_lines": 0,
+      "messages_url": "https://gitai.gz.cvte.cn/cas/bc57de564d4b2eaa28d2f19e00d07b14427b753331330d3ec852c6178d88c13b"
+    }
+  }
+}
