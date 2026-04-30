@@ -1,0 +1,34 @@
+src/llm/prompts/planner_prompts.py
+  4eb9716dcb78d255 29,45-57,65
+src/models/state.py
+  4eb9716dcb78d255 168-176
+tests/unit/test_rename_detection.py
+  4eb9716dcb78d255 1-208
+src/tools/git_tool.py
+  4eb9716dcb78d255 398-419
+src/agents/planner_agent.py
+  4eb9716dcb78d255 98-99,442,445
+src/agents/contracts/planner.yaml
+  4eb9716dcb78d255 14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.10",
+  "base_commit_sha": "08216d75e5363096cbd5617c59d9dfc08d194980",
+  "prompts": {
+    "4eb9716dcb78d255": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "def269f8-7dc6-4174-ac5f-089bd8f25cf3",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Angel",
+      "messages": [],
+      "total_additions": 259,
+      "total_deletions": 3,
+      "accepted_lines": 259,
+      "overriden_lines": 0,
+      "messages_url": "https://gitai.gz.cvte.cn/cas/05569892cd1ae2c96010a4be10589cc6b4292843c0bb6b0af236f962aa41c19e"
+    }
+  }
+}
