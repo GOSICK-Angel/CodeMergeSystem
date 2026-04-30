@@ -165,6 +165,15 @@ class MergeState(BaseModel):
 
     dependency_graph: FileDependencyGraph = Field(default_factory=FileDependencyGraph)
 
+    rename_pairs: list[tuple[str, str]] = Field(
+        default_factory=list,
+        description=(
+            "7.3: (old_path, new_path) rename pairs detected via `git diff -M` "
+            "between merge_base..upstream_ref and merge_base..fork_ref. "
+            "Injected into planner input so the LLM treats moved files as related."
+        ),
+    )
+
     file_diffs: list[FileDiff] = Field(default_factory=list)
     upstream_commits: list[dict[str, Any]] = Field(default_factory=list)
     replayable_commits: list[dict[str, Any]] = Field(default_factory=list)

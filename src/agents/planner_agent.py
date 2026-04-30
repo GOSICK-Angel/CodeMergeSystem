@@ -95,7 +95,8 @@ class PlannerAgent(BaseAgent):
                 "Classifying batch %d/%d (%d files)", idx + 1, total_batches, len(batch)
             )
             plan_data = await self._classify_batch(
-                batch, project_context, system_prompt, idx, total_batches
+                batch, project_context, system_prompt, idx, total_batches,
+                rename_pairs=state.rename_pairs or None,
             )
             all_plan_data.append(plan_data)
 
@@ -438,9 +439,10 @@ class PlannerAgent(BaseAgent):
         system_prompt: str,
         batch_index: int,
         total_batches: int,
+        rename_pairs: list[tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
         prompt = build_classification_prompt(
-            file_diffs, project_context, batch_index, total_batches
+            file_diffs, project_context, batch_index, total_batches, rename_pairs
         )
         messages = [{"role": "user", "content": prompt}]
 

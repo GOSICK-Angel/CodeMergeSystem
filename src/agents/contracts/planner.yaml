@@ -11,6 +11,7 @@ inputs:
   - plan_disputes
   - plan_review_log
   - pollution_audit
+  - rename_pairs
   - shadow_conflicts
   - status
 output_schema: MergePlan

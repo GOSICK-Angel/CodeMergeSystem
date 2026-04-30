@@ -395,6 +395,28 @@ class GitTool:
         except Exception:
             return []
 
+    def detect_renames(self, base_ref: str, head_ref: str) -> list[tuple[str, str]]:
+        """Return (old_path, new_path) pairs for files renamed between base_ref and head_ref.
+
+        Uses ``git diff -M --name-status`` which scores renames by content
+        similarity (default threshold 50%). Empty list on any git error.
+        """
+        try:
+            output = self.repo.git.diff("-M", "--name-status", base_ref, head_ref)
+        except git.GitCommandError:
+            return []
+        pairs: list[tuple[str, str]] = []
+        for line in output.splitlines():
+            if not line or not line.startswith("R"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            old_path, new_path = parts[1].strip(), parts[2].strip()
+            if old_path and new_path:
+                pairs.append((old_path, new_path))
+        return pairs
+
     def grep_in_files(
         self, pattern: str, file_patterns: list[str]
     ) -> dict[str, list[str]]:

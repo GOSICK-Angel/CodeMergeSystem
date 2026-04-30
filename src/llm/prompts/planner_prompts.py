@@ -26,6 +26,7 @@ def build_classification_prompt(
     project_context: str,
     batch_index: int = 0,
     total_batches: int = 1,
+    rename_pairs: list[tuple[str, str]] | None = None,
 ) -> str:
     file_list_lines: list[str] = []
     for fd in file_diffs:
@@ -41,6 +42,19 @@ def build_classification_prompt(
     if total_batches > 1:
         batch_hint = f"\nNote: This is batch {batch_index + 1} of {total_batches}. Classify only the files listed below.\n"
 
+    rename_section = ""
+    if rename_pairs:
+        rename_lines = "\n".join(
+            f"  {old} → {new}" for old, new in rename_pairs
+        )
+        rename_section = (
+            f"\n## Detected File Renames\n"
+            f"The following paths are the same file moved/renamed (treat them as related):\n"
+            f"{rename_lines}\n"
+            f"When both old and new paths appear in the file list, classify them together "
+            f"and note the rename in special_instructions.\n"
+        )
+
     return f"""Analyze the following changed files and create a merge plan.
 
 Project context:
@@ -48,7 +62,7 @@ Project context:
 {batch_hint}
 Changed files ({len(file_diffs)} total):
 {file_list}
-
+{rename_section}
 ## Classification Rules (apply strictly in order)
 
 **auto_safe** — DEFAULT for most files. Use when ALL of:
