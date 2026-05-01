@@ -192,6 +192,13 @@ class LayerCycleError(ValueError):
     """Raised when layer dependencies contain a cycle."""
 
 
+class PlanValidationError(ValueError):
+    """Raised when a MergePlan has structural defects (phantom layer
+    references or dependency cycles) that would cause downstream phases
+    to silently skip files. Caller should surface the failure to the
+    user instead of letting the bad plan flow into auto_merge."""
+
+
 def topological_sort_layers(layers: list[MergeLayer]) -> list[MergeLayer]:
     layer_map = {ly.layer_id: ly for ly in layers}
     in_degree: dict[int, int] = {ly.layer_id: 0 for ly in layers}
@@ -233,6 +240,53 @@ class PhaseFileBatch(BaseModel):
     change_category: FileChangeCategory | None = None
     estimated_duration_minutes: float | None = None
     can_parallelize: bool = True
+
+
+def validate_plan_shape(plan: "MergePlan") -> None:
+    """Hard-validate the layer dependency graph and batch->layer references.
+
+    Catches the silent-skip class of bug where:
+      * a layer declares depends_on=[X] but layer X is not in plan.layers, OR
+      * a PhaseFileBatch.layer_id points to a layer that doesn't exist, OR
+      * the dependency graph contains a cycle.
+
+    `verify_layer_deps` (run-time gate during auto_merge) will treat phantom
+    deps as permanently unmet and silently skip every file in that layer —
+    raise here so the bad plan never reaches auto_merge.
+    """
+    if plan is None or not plan.layers:
+        return
+
+    declared_layer_ids: set[int] = {ly.layer_id for ly in plan.layers}
+
+    phantom_deps: list[tuple[int, list[int]]] = []
+    for ly in plan.layers:
+        missing = [d for d in ly.depends_on if d not in declared_layer_ids]
+        if missing:
+            phantom_deps.append((ly.layer_id, missing))
+
+    phantom_batch_layers: list[tuple[str, int]] = []
+    for batch in plan.phases:
+        if batch.layer_id is not None and batch.layer_id not in declared_layer_ids:
+            phantom_batch_layers.append((batch.batch_id, batch.layer_id))
+
+    if phantom_deps or phantom_batch_layers:
+        problems: list[str] = []
+        for lid, missing in phantom_deps:
+            problems.append(f"layer {lid} depends_on {missing} (not declared)")
+        for batch_id, lid in phantom_batch_layers:
+            problems.append(
+                f"batch {batch_id} references layer_id {lid} (not declared)"
+            )
+        raise PlanValidationError(
+            "Plan layer graph references undeclared layers: "
+            + "; ".join(problems)
+        )
+
+    try:
+        topological_sort_layers(plan.layers)
+    except LayerCycleError as exc:
+        raise PlanValidationError(str(exc)) from exc
 
 
 class CategorySummary(BaseModel):

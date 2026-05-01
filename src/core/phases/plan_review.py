@@ -8,7 +8,7 @@ from uuid import uuid4
 from src.cli.paths import get_report_dir
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.models.diff import FileDiff, RiskLevel
-from src.models.plan import MergePhase
+from src.models.plan import MergePhase, PlanValidationError, validate_plan_shape
 from src.models.plan_judge import PlanIssue, PlanJudgeResult, PlanJudgeVerdict
 from src.models.plan_review import (
     DecisionOption,
@@ -48,6 +48,43 @@ class PlanReviewPhase(Phase):
 
         all_prior_issues: list[PlanIssue] = []
         last_planner_responses: list[PlannerIssueResponse] | None = None
+
+        if state.merge_plan is not None:
+            try:
+                validate_plan_shape(state.merge_plan)
+            except PlanValidationError as exc:
+                logger.error(
+                    "Plan shape validation failed before LLM judge: %s", exc
+                )
+                phase_result = phase_result.model_copy(
+                    update={"status": "completed", "completed_at": datetime.now()}
+                )
+                state.phase_results[MergePhase.PLAN_REVIEW.value] = phase_result
+                state.review_conclusion = ReviewConclusion(
+                    reason=ReviewConclusionReason.LLM_FAILURE,
+                    final_round=0,
+                    total_rounds=0,
+                    max_rounds=max_rounds,
+                    summary=(
+                        "Plan rejected before LLM review: structural defect "
+                        f"in layer dependency graph — {exc}. Fix the planner "
+                        "output (or layer config) and re-run."
+                    ),
+                )
+                ctx.notify(
+                    "planner_judge",
+                    f"Plan structurally invalid: {exc}",
+                )
+                ctx.state_machine.transition(
+                    state,
+                    SystemStatus.AWAITING_HUMAN,
+                    f"plan structurally invalid: {exc}",
+                )
+                return PhaseOutcome(
+                    target_status=SystemStatus.AWAITING_HUMAN,
+                    reason=f"plan structurally invalid: {exc}",
+                    checkpoint_tag="after_phase1_5",
+                )
 
         for round_num in range(max_rounds + 1):
             state.plan_revision_rounds = round_num
