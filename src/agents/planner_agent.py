@@ -453,6 +453,10 @@ class PlannerAgent(BaseAgent):
         prompt = build_classification_prompt(
             file_diffs, project_context, batch_index, total_batches, rename_pairs
         )
+        file_paths = [fd.file_path for fd in file_diffs]
+        memory_text = self.get_memory_context(self._current_phase, file_paths)
+        if memory_text:
+            prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
         messages = [{"role": "user", "content": prompt}]
 
         try:
@@ -982,11 +986,24 @@ class PlannerAgent(BaseAgent):
 
         enhanced_diffs = list(file_diffs)
 
+        gray_paths = [
+            fd.file_path
+            for fd in enhanced_diffs
+            if gray_low <= fd.risk_score <= gray_high
+        ]
+        memory_text = (
+            self.get_memory_context(self._current_phase, gray_paths)
+            if gray_paths
+            else ""
+        )
+
         for i, fd in enumerate(enhanced_diffs):
             if not (gray_low <= fd.risk_score <= gray_high):
                 continue
 
             prompt = build_risk_scoring_prompt(fd, fd.risk_score)
+            if memory_text:
+                prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
             messages = [{"role": "user", "content": prompt}]
 
             try:

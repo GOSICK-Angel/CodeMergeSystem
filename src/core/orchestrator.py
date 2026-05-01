@@ -163,6 +163,7 @@ class Orchestrator:
         self._memory_store: MemoryStore | SQLiteMemoryStore = MemoryStore()
         self._memory_hit_tracker = MemoryHitTracker()
         self._summarizer = PhaseSummarizer()
+        self._phases_since_last_extract: int = 0
 
         # --- hooks (C1) ---
         self._hooks = HookManager()
@@ -414,11 +415,13 @@ class Orchestrator:
         except Exception as e:
             logger.warning("Memory summarization failed for %s: %s", phase, e)
 
+        self._phases_since_last_extract += 1
         if self.memory_extractor is not None and self._should_llm_extract(phase, state):
             try:
                 llm_entries = await self.memory_extractor.extract(phase, state)  # type: ignore[attr-defined]
                 for entry in llm_entries:
                     self._memory_store.add_entry(entry)
+                self._phases_since_last_extract = 0
             except Exception as exc:
                 logger.warning("LLM memory extraction failed for %s: %s", phase, exc)
 
@@ -444,6 +447,10 @@ class Orchestrator:
                 for d in state.coordinator_directives
             )
         ):
+            return True
+        # O-M (6.3): periodic L2 aggregation on long happy-path runs.
+        every_n = getattr(cfg, "periodic_extraction_every_n_phases", 0)
+        if every_n > 0 and self._phases_since_last_extract >= every_n:
             return True
         return False
 

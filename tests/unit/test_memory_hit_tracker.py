@@ -342,3 +342,19 @@ def test_summary_outcomes_ranks_helpful_and_harmful():
     assert helpful[0]["score"] == 1.0
     assert harmful and harmful[0]["entry_id"] == "bad"
     assert harmful[0]["score"] == -1.0
+
+
+def test_summary_includes_effective_hit_rate():
+    tracker = MemoryHitTracker()
+    summary = tracker.summary()
+    assert summary["effective_hit_rate"] == 0.0
+    assert summary["effective_observations"] == 0
+
+    tracker.record_injection(["a.py", "b.py"], ["e1", "e2"])
+    tracker.record_outcome("a.py", success=True)
+    tracker.record_outcome("a.py", success=True)
+    tracker.record_outcome("b.py", success=False)
+
+    summary = tracker.summary()
+    assert summary["effective_observations"] == 6
+    assert summary["effective_hit_rate"] == 4 / 6

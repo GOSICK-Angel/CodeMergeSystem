@@ -154,10 +154,21 @@ class MemoryHitTracker:
             for phase_layers in self._entries_by_phase_layer.values():
                 for layer, count in phase_layers.items():
                     by_layer[layer] += count
+            total_pass = 0
+            total_fail = 0
+            for counters in self._entry_outcomes.values():
+                total_pass += counters.get("pass", 0)
+                total_fail += counters.get("fail", 0)
+            outcome_total = total_pass + total_fail
+            effective_hit_rate = (
+                total_pass / outcome_total if outcome_total > 0 else 0.0
+            )
             return {
                 "total_calls": total_calls,
                 "hit_calls": total_hit_calls,
                 "hit_rate": hit_rate,
+                "effective_hit_rate": effective_hit_rate,
+                "effective_observations": outcome_total,
                 "by_phase": by_phase,
                 "by_layer": dict(by_layer),
                 "outcomes": self._outcomes_summary_unsafe(),

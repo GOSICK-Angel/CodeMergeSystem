@@ -489,6 +489,13 @@ class MemoryExtractionConfig(BaseModel):
         "the layered loader tightens caps (L0/L1/L2) and applies "
         "relevance_min_score so prompts don't bloat past the context window.",
     )
+    periodic_extraction_every_n_phases: int = Field(
+        default=0,
+        ge=0,
+        description="O-M (6.3): when > 0, run memory_extractor every N "
+        "completed phases regardless of error/dispute triggers, so L2 "
+        "aggregation grows on long happy-path runs. 0 disables.",
+    )
 
 
 class CoordinatorConfig(BaseModel):
